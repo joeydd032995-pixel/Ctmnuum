@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "FND-TEMP-001",
+  "phase": "foundation",
+  "title": "Temporal Foundation contracts and replay safety",
+  "status": "planned",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003",
+    "CONT-V12-TEMP-001"
+  ],
+  "dependencies": [
+    "FND-CTRL-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-TEMP-G1",
+      "description": "Temporal workflow and Activity ownership boundaries are explicit and deterministic workflow code contains no direct nondeterministic I/O.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-TEMP-G2",
+      "description": "Workflow replay/versioning tests pass for the initial Foundation workflow contracts.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-TEMP-G3",
+      "description": "Task queues, retry classes, timeouts, heartbeats, cancellation, and Continue-As-New policies are encoded and tested.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-TEMP-G4",
+      "description": "Worker deployment/versioning configuration has a tested rollback path and no production workflow depends on preview-only Temporal features.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the Temporal Foundation commits and redeploy the previous compatible worker build; no higher-level reasoning package may depend on the new contracts until these gates pass."
+}
