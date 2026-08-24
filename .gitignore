@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+coverage/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Terraform
+**/.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+.terraform.lock.hcl.backup
+
+# Kubernetes / Helm generated output
+*.rendered.yaml
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/
+
+# Local artifacts
+artifacts/
+tmp/
