@@ -339,6 +339,22 @@ def verify_repository(root: Path) -> list[str]:
             "only one phase may be in_progress: " + ", ".join(sorted(in_progress))
         )
 
+    for phase_id, phase in state.phases.items():
+        label = f"phase {phase_id}"
+        order = phase.get("order")
+        if not isinstance(order, int) or isinstance(order, bool) or order <= 1:
+            continue
+        expected_predecessor = phase_orders.get(order - 1)
+        if expected_predecessor is None:
+            errors.append(
+                f"{label}: immediate predecessor order {order - 1} is missing"
+            )
+        elif phase.get("predecessor") != expected_predecessor:
+            errors.append(
+                f"{label}: immediate predecessor must be '{expected_predecessor}' "
+                f"(order {order - 1})"
+            )
+
     gap_fields = ("id", "description", "status", "severity", "blocks", "tracking")
     for gap_id, gap in state.source_gaps.items():
         label = f"source gap {gap_id}"
@@ -369,25 +385,47 @@ def verify_repository(root: Path) -> list[str]:
         label = f"work package {package_id}"
         _require_keys(package, package_fields, label, errors)
         phase_id = package.get("phase")
+        title = package.get("title")
         status = package.get("status")
         risk = package.get("risk")
-        if phase_id not in state.phases:
+
+        phase_is_string = isinstance(phase_id, str) and bool(phase_id.strip())
+        if not phase_is_string:
+            errors.append(f"{label}: phase must be a non-empty string")
+        elif phase_id not in state.phases:
             errors.append(f"{label}: unknown phase '{phase_id}'")
-        if status not in WORK_PACKAGE_STATUSES:
+
+        if not isinstance(title, str) or not title.strip():
+            errors.append(f"{label}: title must be a non-empty string")
+
+        status_is_string = isinstance(status, str) and bool(status.strip())
+        if not status_is_string:
+            errors.append(f"{label}: status must be a non-empty string")
+        elif status not in WORK_PACKAGE_STATUSES:
             errors.append(f"{label}: invalid status '{status}'")
-        if risk not in RISKS:
+
+        risk_is_string = isinstance(risk, str) and bool(risk.strip())
+        if not risk_is_string:
+            errors.append(f"{label}: risk must be a non-empty string")
+        elif risk not in RISKS:
             errors.append(f"{label}: invalid risk '{risk}'")
+
         approval_required = package.get("approval_required")
         if not isinstance(approval_required, bool):
             errors.append(f"{label}: approval_required must be boolean")
-        elif risk in {"high", "critical"} and not approval_required:
+        elif risk_is_string and risk in {"high", "critical"} and not approval_required:
             errors.append(f"{label}: {risk} risk requires approval_required=true")
 
         requirements = package.get("source_requirements")
         if not isinstance(requirements, list) or not requirements:
             errors.append(f"{label}: source_requirements must be a non-empty list")
         else:
-            for requirement_id in requirements:
+            for index, requirement_id in enumerate(requirements):
+                if not isinstance(requirement_id, str) or not requirement_id.strip():
+                    errors.append(
+                        f"{label}: source_requirements[{index}] must be a non-empty string"
+                    )
+                    continue
                 if requirement_id not in state.requirements:
                     errors.append(f"{label}: unknown requirement '{requirement_id}'")
 
@@ -408,7 +446,7 @@ def verify_repository(root: Path) -> list[str]:
         for blocker in blockers:
             if blocker not in state.source_gaps:
                 errors.append(f"{label}: unknown blocker/source-gap '{blocker}'")
-        if status == "complete" and blockers:
+        if status_is_string and status == "complete" and blockers:
             errors.append(f"{label}: complete package cannot have blockers")
 
         if not isinstance(package.get("rollback"), str) or not package.get(
@@ -428,7 +466,7 @@ def verify_repository(root: Path) -> list[str]:
                     label=gate_label,
                     root=root,
                     errors=errors,
-                    require_pass=(status == "complete"),
+                    require_pass=(status_is_string and status == "complete"),
                 )
                 if isinstance(gate, dict):
                     gate_id = gate.get("id")
@@ -437,14 +475,19 @@ def verify_repository(root: Path) -> list[str]:
                             errors.append(f"{label}: duplicate gate id '{gate_id}'")
                         gate_ids.add(gate_id)
 
-        if status in {"ready", "in_progress", "complete"}:
+        if status_is_string and status in {"ready", "in_progress", "complete"}:
             for dependency_id in dependencies:
                 dependency = state.work_packages.get(dependency_id)
                 if dependency is not None and dependency.get("status") != "complete":
                     errors.append(
                         f"{label}: dependency '{dependency_id}' must be complete before status '{status}'"
                     )
-        if status in {"ready", "in_progress"} and phase_id in state.phases:
+        if (
+            status_is_string
+            and status in {"ready", "in_progress"}
+            and phase_is_string
+            and phase_id in state.phases
+        ):
             if state.phases[phase_id].get("status") != "in_progress":
                 errors.append(
                     f"{label}: owning phase '{phase_id}' must be in_progress before status '{status}'"
@@ -530,7 +573,11 @@ def render_report(state: ControlState, errors: list[str]) -> str:
     lines.extend(["", "## Next eligible work packages", ""])
     if eligible:
         for package in eligible:
-            lines.append(f"- `{package['id']}` — {package['title']}")
+            package_id = package.get("id")
+            title = package.get("title")
+            display_id = package_id if isinstance(package_id, str) and package_id else "<invalid id>"
+            display_title = title if isinstance(title, str) and title.strip() else "<missing title>"
+            lines.append(f"- `{display_id}` — {display_title}")
     else:
         lines.append("- None")
 
