@@ -10,9 +10,30 @@ This directory is the repository-native control state for building Continuum fro
 - `work-packages/*.json` — dependency-aware units of implementation work.
 - `evidence/` — repository evidence referenced by passing gates.
 
-The work-package contract is documented by `schemas/implementation-work-package.schema.json` and enforced by `scripts/control_plane.py`.
+The work-package contract is documented by `schemas/implementation-work-package.schema.json`.
+
+The control plane has two code layers:
+
+- `scripts/control_plane.py` — core loading, structural validation, dependency checks, evidence validation, report rendering, and eligibility primitives.
+- `scripts/control_plane_policy.py` — the **authoritative enforcement CLI**. It combines the core engine with cross-registry governance such as strict phase ordering, inactive-phase completion prevention, and automatic source-gap blocking.
 
 ## Commands
+
+Use the policy CLI for project decisions and CI:
+
+```bash
+python scripts/control_plane_policy.py verify
+python scripts/control_plane_policy.py report
+python scripts/control_plane_policy.py next
+```
+
+`verify` returns non-zero for invalid state, unknown references, dependency cycles, illegal phase/package progression, incomplete hard gates, missing evidence, unresolved blockers, source-gap bypasses, invalid phase predecessor chains, or premature autonomous-capability activation.
+
+`report` prints a Markdown status report suitable for CI artifacts and PR comments. Open source gaps are applied as effective blockers before the report is rendered.
+
+`next` prints only work packages whose dependencies are complete, blockers are empty, owning phase is active, and no open source gap blocks the package.
+
+The lower-level core CLI remains available for debugging structural validation:
 
 ```bash
 python scripts/control_plane.py verify
@@ -20,18 +41,14 @@ python scripts/control_plane.py report
 python scripts/control_plane.py next
 ```
 
-`verify` returns non-zero for invalid state, unknown references, dependency cycles, illegal phase/package progression, incomplete hard gates, missing evidence, unresolved blockers on completed packages, or premature autonomous-capability activation.
-
-`report` prints a Markdown status report suitable for CI artifacts and PR comments.
-
-`next` prints only work packages whose dependencies are complete, blockers are empty, and owning phase is active.
+It MUST NOT be used as the authoritative merge/progression gate because it intentionally excludes cross-registry policy enforcement.
 
 ## Work-package lifecycle
 
 ```text
 planned
   │
-  ├── dependencies complete + phase active
+  ├── dependencies complete + phase active + no open source-gap block
   ▼
 ready
   ▼
@@ -45,7 +62,9 @@ in_progress
                                   complete
 ```
 
-A package may remain `planned` even when technically eligible; `next` will still surface it. `ready` is an explicit declaration that dependency checks have been satisfied and implementation may begin.
+A package may remain `planned` even when technically eligible; `next` will still surface it. `ready` is an explicit declaration that dependency and blocker checks have been satisfied and implementation may begin.
+
+A package cannot be marked `complete` while its owning phase is inactive. An open source gap that lists a work-package ID in its `blocks` array is an effective blocker even if someone omits that gap from the package record; the verifier also requires the explicit blocker relationship to be reflected in the package.
 
 ## Acceptance gates
 
@@ -85,7 +104,7 @@ The phase order is:
 6. Self-extension
 7. Evolution
 
-Only one phase may be `in_progress`. A later phase cannot become `in_progress` or `accepted` until its predecessor is `accepted`.
+Phase orders must remain contiguous. Each phase after Foundation must name the immediately preceding phase as its predecessor. Only one phase may be `in_progress`. A later phase cannot become `in_progress` or `accepted` until its predecessor is `accepted`.
 
 Autonomous/self-modifying capability remains disabled until the Evolution phase itself is accepted after all predecessor phases and safety gates have passed.
 
@@ -96,7 +115,7 @@ Autonomous/self-modifying capability remains disabled until the Evolution phase 
 It:
 
 1. runs the control-plane unit tests;
-2. verifies repository state;
+2. runs the authoritative policy verifier;
 3. generates a Markdown status report;
 4. uploads the report as an Actions artifact;
 5. creates or updates one marker-delimited PR status comment.
