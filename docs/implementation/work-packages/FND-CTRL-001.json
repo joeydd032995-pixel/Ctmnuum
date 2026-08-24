@@ -3,7 +3,7 @@
   "id": "FND-CTRL-001",
   "phase": "foundation",
   "title": "Repository-native implementation control plane",
-  "status": "in_progress",
+  "status": "complete",
   "risk": "low",
   "approval_required": false,
   "source_requirements": [
@@ -19,29 +19,44 @@
       "id": "FND-CTRL-G1",
       "description": "Control-plane tests cover repository validity, evidence enforcement, dependency cycles, phase progression, and next-package eligibility.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {"path": "tests/control_plane/test_control_plane.py"},
+        {"path": "docs/implementation/evidence/FND-CTRL-001.md"}
+      ]
     },
     {
       "id": "FND-CTRL-G2",
       "description": "The dependency-free verifier returns zero errors for repository control state and non-zero for invalid fixtures.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {"path": "scripts/control_plane.py"},
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32785787899"}
+      ]
     },
     {
       "id": "FND-CTRL-G3",
       "description": "GitHub Actions generates a control-plane report and PR status comment without repository secrets or auto-merge authority.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {"path": ".github/workflows/implementation-control-plane.yml"},
+        {"path": ".github/pull_request_template.md"},
+        {"path": ".github/ISSUE_TEMPLATE/work-package.yml"},
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32785787899"}
+      ]
     },
     {
       "id": "FND-CTRL-G4",
       "description": "After FND-CTRL-001 is complete, the next command identifies FND-TEMP-001 as eligible Foundation work.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {"path": "tests/control_plane/test_control_plane.py"},
+        {"path": "docs/implementation/work-packages/FND-TEMP-001.json"},
+        {"path": "docs/implementation/evidence/FND-CTRL-001.md"}
+      ]
     }
   ],
   "blockers": [],
