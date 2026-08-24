@@ -17,7 +17,7 @@
   "acceptance_gates": [
     {
       "id": "FND-CTRL-G1",
-      "description": "Control-plane tests cover repository validity, evidence enforcement, dependency cycles, phase progression, and next-package eligibility.",
+      "description": "Control-plane tests cover repository validity, evidence enforcement, dependency cycles, phase progression, source-gap enforcement, and next-package eligibility.",
       "hard": true,
       "status": "PASS",
       "evidence": [
@@ -27,11 +27,12 @@
     },
     {
       "id": "FND-CTRL-G2",
-      "description": "The dependency-free verifier returns zero errors for repository control state and non-zero for invalid fixtures.",
+      "description": "The dependency-free verifier plus cross-registry policy layer return zero errors for valid repository state and reject invalid fixtures or governance bypasses.",
       "hard": true,
       "status": "PASS",
       "evidence": [
         {"path": "scripts/control_plane.py"},
+        {"path": "scripts/control_plane_policy.py"},
         {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32785787899"}
       ]
     },
@@ -49,11 +50,12 @@
     },
     {
       "id": "FND-CTRL-G4",
-      "description": "After FND-CTRL-001 is complete, the next command identifies FND-TEMP-001 as eligible Foundation work.",
+      "description": "After FND-CTRL-001 is complete, the authoritative next command identifies FND-TEMP-001 as eligible Foundation work.",
       "hard": true,
       "status": "PASS",
       "evidence": [
         {"path": "tests/control_plane/test_control_plane.py"},
+        {"path": "scripts/control_plane_policy.py"},
         {"path": "docs/implementation/work-packages/FND-TEMP-001.json"},
         {"path": "docs/implementation/evidence/FND-CTRL-001.md"}
       ]
