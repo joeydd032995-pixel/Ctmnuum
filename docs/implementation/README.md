@@ -19,12 +19,12 @@ The control plane has two code layers:
 
 ## Commands
 
-Use the policy CLI for project decisions and CI:
+Use the policy CLI for project decisions and CI. Invoke repository CLIs as Python modules so package imports resolve consistently in local and CI environments:
 
 ```bash
-python scripts/control_plane_policy.py verify
-python scripts/control_plane_policy.py report
-python scripts/control_plane_policy.py next
+python -m scripts.control_plane_policy verify
+python -m scripts.control_plane_policy report
+python -m scripts.control_plane_policy next
 ```
 
 `verify` returns non-zero for invalid state, unknown references, dependency cycles, illegal phase/package progression, incomplete hard gates, missing evidence, unresolved blockers, source-gap bypasses, invalid phase predecessor chains, or premature autonomous-capability activation.
@@ -36,9 +36,9 @@ python scripts/control_plane_policy.py next
 The lower-level core CLI remains available for debugging structural validation:
 
 ```bash
-python scripts/control_plane.py verify
-python scripts/control_plane.py report
-python scripts/control_plane.py next
+python -m scripts.control_plane verify
+python -m scripts.control_plane report
+python -m scripts.control_plane next
 ```
 
 It MUST NOT be used as the authoritative merge/progression gate because it intentionally excludes cross-registry policy enforcement.
