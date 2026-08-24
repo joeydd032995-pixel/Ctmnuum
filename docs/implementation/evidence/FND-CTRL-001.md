@@ -47,21 +47,33 @@ GitHub Actions run:
 
 `https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32785980767`
 
-This run verified the repository after `FND-CTRL-001` was marked complete with all four hard gates PASS. The generated control-plane report identified `FND-TEMP-001` as the next eligible Foundation package.
+This run verified the completed control-plane record and confirmed that `FND-TEMP-001` became the next eligible Foundation package.
 
-## Review hardening
+### Review-hardening invocation RED
 
-A manual final-diff review identified three policy bypasses that were not covered by the first implementation:
+GitHub Actions run:
 
-1. a work package could be set directly to `complete` while its owning phase was inactive;
-2. a source gap could declare that it blocked a package without that relationship being enforced by eligibility logic;
-3. phase ordering did not require the predecessor chain to exactly follow the numeric phase order.
+`https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32786671365`
 
-The hardening pass added `scripts/control_plane_policy.py` and tests that reject all three cases. The policy layer is now the authoritative CI/CLI entry point, while `scripts/control_plane.py` remains the structural core.
+A regression test reproduced the Python package-import failure caused by invoking the policy layer as a script path instead of as a module.
+
+### Post-hardening GREEN
+
+GitHub Actions run:
+
+`https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32786766229`
+
+Verified steps:
+
+- control-plane unit tests — PASS
+- authoritative policy verification — PASS
+- Markdown status report generation — PASS
+- Actions artifact upload — PASS
+- PR status comment publication — PASS
 
 ## Implementation evidence
 
-- Core verifier/report/eligibility primitives: `scripts/control_plane.py`
+- Core verifier/report/next primitives: `scripts/control_plane.py`
 - Authoritative cross-registry governance: `scripts/control_plane_policy.py`
 - Tests: `tests/control_plane/test_control_plane.py`
 - CI: `.github/workflows/implementation-control-plane.yml`
@@ -81,10 +93,10 @@ The control plane does not create or mutate persistent external infrastructure. 
 
 The merge candidate must prove all of the following simultaneously:
 
-1. `python scripts/control_plane_policy.py verify` returns zero errors;
+1. `python -m scripts.control_plane_policy verify` returns zero errors;
 2. all `FND-CTRL-001` hard gates are `PASS` with evidence;
 3. `FND-CTRL-001` is `complete`;
-4. `python scripts/control_plane_policy.py next` identifies `FND-TEMP-001` as eligible;
+4. `python -m scripts.control_plane_policy next` identifies `FND-TEMP-001` as eligible;
 5. the final GitHub Actions run passes after the review-hardening changes;
 6. external PR review has no unresolved merge-blocking findings.
 
