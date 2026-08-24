@@ -251,6 +251,13 @@ class RepositoryContractTests(unittest.TestCase):
             errors = policy_errors(load_control_state(root))
             self.assertTrue(any("predecessor chain" in error.lower() for error in errors), errors)
 
+    def test_workflow_invokes_policy_cli_as_python_module(self) -> None:
+        workflow = (ROOT / ".github/workflows/implementation-control-plane.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("python -m scripts.control_plane_policy verify", workflow)
+        self.assertIn("python -m scripts.control_plane_policy report", workflow)
+
     def test_completed_control_plane_unlocks_temporal_foundation(self) -> None:
         state = load_control_state(ROOT)
         self.assertEqual(state.work_packages["FND-CTRL-001"]["status"], "complete")
