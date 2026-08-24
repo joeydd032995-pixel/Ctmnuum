@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.control_plane import eligible_work_packages, load_control_state, verify_repository
+from scripts.control_plane import (
+    eligible_work_packages,
+    load_control_state,
+    render_report,
+    verify_repository,
+)
 from scripts.control_plane_policy import policy_errors, strict_eligible_work_packages
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -183,6 +188,30 @@ class RepositoryContractTests(unittest.TestCase):
             errors = verify_repository(root)
             self.assertTrue(any("predecessor" in error.lower() for error in errors), errors)
 
+    def test_core_phase_validation_rejects_skipped_immediate_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            phases_path = root / "docs/implementation/phases.json"
+            payload = json.loads(phases_path.read_text(encoding="utf-8"))
+            payload["phases"][0]["status"] = "accepted"
+            payload["phases"].append(
+                {
+                    "id": "memory",
+                    "name": "Memory",
+                    "order": 3,
+                    "status": "in_progress",
+                    "predecessor": "foundation",
+                    "acceptance_gates": [],
+                    "autonomous_capability_allowed": False,
+                }
+            )
+            _write_json(phases_path, payload)
+            errors = verify_repository(root)
+            self.assertTrue(
+                any("immediate predecessor" in error.lower() for error in errors), errors
+            )
+
     def test_complete_package_cannot_bypass_phase_activation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -250,6 +279,63 @@ class RepositoryContractTests(unittest.TestCase):
             _write_json(phases_path, payload)
             errors = policy_errors(load_control_state(root))
             self.assertTrue(any("predecessor chain" in error.lower() for error in errors), errors)
+
+    def test_malformed_package_scalars_return_validation_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            malformed = _package("FND-B")
+            malformed["phase"] = ["foundation"]
+            malformed["title"] = None
+            malformed["status"] = {"value": "planned"}
+            malformed["risk"] = ["low"]
+            malformed["source_requirements"] = [["REQ-001"]]
+            _write_json(
+                root / "docs/implementation/work-packages/FND-B.json", malformed
+            )
+
+            try:
+                errors = verify_repository(root)
+            except TypeError as exc:
+                self.fail(f"verification raised TypeError for malformed scalar data: {exc}")
+
+            joined = "\n".join(errors).lower()
+            self.assertIn("phase must be a non-empty string", joined)
+            self.assertIn("title must be a non-empty string", joined)
+            self.assertIn("status must be a non-empty string", joined)
+            self.assertIn("risk must be a non-empty string", joined)
+            self.assertIn("source_requirements[0] must be a non-empty string", joined)
+
+    def test_report_renders_validation_errors_for_package_missing_title(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            package = _package("FND-B")
+            del package["title"]
+            _write_json(
+                root / "docs/implementation/work-packages/FND-B.json", package
+            )
+            errors = verify_repository(root)
+            state = load_control_state(root)
+
+            report = render_report(state, errors)
+
+            self.assertIn("## Verification errors", report)
+            self.assertIn("missing required field 'title'", report)
+
+    def test_authoritative_commands_use_policy_module_invocation(self) -> None:
+        template = (ROOT / ".github/pull_request_template.md").read_text(
+            encoding="utf-8"
+        )
+        evidence = (
+            ROOT / "docs/implementation/evidence/FND-CTRL-001.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("python -m scripts.control_plane_policy verify", template)
+        self.assertNotIn("python scripts/control_plane.py verify", template)
+        self.assertIn("python -m scripts.control_plane_policy verify", evidence)
+        self.assertIn("python -m scripts.control_plane_policy next", evidence)
+        self.assertNotIn("python scripts/control_plane_policy.py", evidence)
 
     def test_workflow_invokes_policy_cli_as_python_module(self) -> None:
         workflow = (ROOT / ".github/workflows/implementation-control-plane.yml").read_text(
