@@ -1,0 +1,94 @@
+name: Continuum work package
+description: Create a governed implementation work package tied to the Continuum control plane.
+title: "[WORK PACKAGE] "
+body:
+  - type: input
+    id: work_package_id
+    attributes:
+      label: Work package ID
+      description: Use the immutable ID registered under docs/implementation/work-packages/.
+      placeholder: FND-TEMP-001
+    validations:
+      required: true
+
+  - type: input
+    id: phase
+    attributes:
+      label: Phase
+      placeholder: foundation
+    validations:
+      required: true
+
+  - type: textarea
+    id: source_requirements
+    attributes:
+      label: Source requirement IDs
+      description: One requirement ID per line.
+      placeholder: |
+        CONT-V12-GOV-001
+        CONT-V12-TEMP-001
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk class
+      options:
+        - low
+        - medium
+        - high
+        - critical
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies
+      description: Work-package IDs that must be complete first, or None.
+      placeholder: FND-CTRL-001
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance_gates
+    attributes:
+      label: Hard acceptance gates
+      description: State each objective, machine-verifiable gate before implementation starts.
+      placeholder: |
+        FND-TEMP-G1 — deterministic workflow boundary tests pass
+        FND-TEMP-G2 — replay/versioning tests pass
+    validations:
+      required: true
+
+  - type: textarea
+    id: rollback
+    attributes:
+      label: Rollback strategy
+      description: Exact reversal/recovery action if the package fails after integration.
+    validations:
+      required: true
+
+  - type: textarea
+    id: source_gaps
+    attributes:
+      label: Source gaps / ADRs
+      description: Existing source-gap IDs and ADRs that constrain the package, or None.
+      placeholder: None
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: governance
+    attributes:
+      label: Governance confirmation
+      options:
+        - label: I checked the work-package dependencies against the control-plane registry.
+          required: true
+        - label: I will not represent unsupported implementation choices as recovered v1.2 source text.
+          required: true
+        - label: Completion will not be claimed until all hard gates have PASS evidence.
+          required: true
+        - label: Merge remains a human-controlled action.
+          required: true
