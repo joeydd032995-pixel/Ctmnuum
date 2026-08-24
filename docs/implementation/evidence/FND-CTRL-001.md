@@ -47,33 +47,21 @@ GitHub Actions run:
 
 `https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32785980767`
 
-This run verified the completed control-plane record and confirmed that `FND-TEMP-001` became the next eligible Foundation package.
+This run verified the repository after `FND-CTRL-001` was marked complete with all four hard gates PASS. The generated control-plane report identified `FND-TEMP-001` as the next eligible Foundation package.
 
-### Review-hardening invocation RED
+## Review hardening
 
-GitHub Actions run:
+A manual final-diff review identified three policy bypasses that were not covered by the first implementation:
 
-`https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32786671365`
+1. a work package could be set directly to `complete` while its owning phase was inactive;
+2. a source gap could declare that it blocked a package without that relationship being enforced by eligibility logic;
+3. phase ordering did not require the predecessor chain to exactly follow the numeric phase order.
 
-A regression test reproduced the Python package-import failure caused by invoking the policy layer as a script path instead of as a module.
-
-### Post-hardening GREEN
-
-GitHub Actions run:
-
-`https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32786766229`
-
-Verified steps:
-
-- control-plane unit tests — PASS
-- authoritative policy verification — PASS
-- Markdown status report generation — PASS
-- Actions artifact upload — PASS
-- PR status comment publication — PASS
+The hardening pass added `scripts/control_plane_policy.py` and tests that reject all three cases. The policy layer is now the authoritative CI/CLI entry point, while `scripts/control_plane.py` remains the structural core.
 
 ## Implementation evidence
 
-- Core verifier/report/next primitives: `scripts/control_plane.py`
+- Core verifier/report/eligibility primitives: `scripts/control_plane.py`
 - Authoritative cross-registry governance: `scripts/control_plane_policy.py`
 - Tests: `tests/control_plane/test_control_plane.py`
 - CI: `.github/workflows/implementation-control-plane.yml`
