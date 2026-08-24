@@ -1,0 +1,49 @@
+{
+  "schema_version": 1,
+  "id": "FND-CTRL-001",
+  "phase": "foundation",
+  "title": "Repository-native implementation control plane",
+  "status": "in_progress",
+  "risk": "low",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-002",
+    "CONT-V12-GOV-003",
+    "CONT-LOCAL-GOV-001",
+    "CONT-LOCAL-GOV-002"
+  ],
+  "dependencies": [],
+  "acceptance_gates": [
+    {
+      "id": "FND-CTRL-G1",
+      "description": "Control-plane tests cover repository validity, evidence enforcement, dependency cycles, phase progression, and next-package eligibility.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-CTRL-G2",
+      "description": "The dependency-free verifier returns zero errors for repository control state and non-zero for invalid fixtures.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-CTRL-G3",
+      "description": "GitHub Actions generates a control-plane report and PR status comment without repository secrets or auto-merge authority.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-CTRL-G4",
+      "description": "After FND-CTRL-001 is complete, the next command identifies FND-TEMP-001 as eligible Foundation work.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the implementation-control-plane PR; all control-plane state is repository-only and introduces no external persistent resources."
+}
