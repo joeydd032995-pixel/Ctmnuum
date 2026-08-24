@@ -31,7 +31,7 @@ For each gate in the work-package record, include status and evidence.
 ## Verification performed
 
 - [ ] `python -m unittest discover -s tests/control_plane -p 'test_*.py' -v`
-- [ ] `python scripts/control_plane.py verify`
+- [ ] `python -m scripts.control_plane_policy verify`
 - [ ] Work-package-specific tests/evals executed
 - [ ] CI result attached as evidence where required
 
