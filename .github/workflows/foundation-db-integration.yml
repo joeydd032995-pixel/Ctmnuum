@@ -1,0 +1,52 @@
+name: Foundation DB Integration
+
+on:
+  push:
+    branches:
+      - feat/foundation-phase-1
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-18-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-trixie
+        env:
+          POSTGRES_DB: continuum_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d continuum_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGDATABASE: continuum_test
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply v1.2 source-backed bootstrap
+        run: psql -v ON_ERROR_STOP=1 -f packages/continuum_db/sql/bootstrap.sql
+
+      - name: Execute bootstrap integration assertions
+        run: psql -v ON_ERROR_STOP=1 -f tests/integration/database_bootstrap.sql
