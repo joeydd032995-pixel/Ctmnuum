@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "phases": [
+    {
+      "id": "foundation",
+      "name": "Foundation",
+      "order": 1,
+      "status": "in_progress",
+      "predecessor": null,
+      "acceptance_gates": [
+        {
+          "id": "PH-FND-G1",
+          "description": "Foundation production-readiness gate passes with required infrastructure, security, observability, recovery, and CI evidence.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "persistent_reasoning",
+      "name": "Persistent Reasoning",
+      "order": 2,
+      "status": "planned",
+      "predecessor": "foundation",
+      "acceptance_gates": [
+        {
+          "id": "PH-REASON-G1",
+          "description": "Persistent reasoning contracts, provenance, and deterministic orchestration gates pass.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "memory",
+      "name": "Memory",
+      "order": 3,
+      "status": "planned",
+      "predecessor": "persistent_reasoning",
+      "acceptance_gates": [
+        {
+          "id": "PH-MEM-G1",
+          "description": "Memory retrieval, promotion, invalidation, freshness, and tenant-isolation gates pass.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "reliability",
+      "name": "Reliability",
+      "order": 4,
+      "status": "planned",
+      "predecessor": "memory",
+      "acceptance_gates": [
+        {
+          "id": "PH-REL-G1",
+          "description": "Falsification, Watcher, evaluation, calibration, regression, and adversarial gates pass.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "actions",
+      "name": "Actions",
+      "order": 5,
+      "status": "planned",
+      "predecessor": "reliability",
+      "acceptance_gates": [
+        {
+          "id": "PH-ACT-G1",
+          "description": "Action Broker, approvals, scoped credentials, sandbox, connector, and rollback gates pass.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "self_extension",
+      "name": "Self-extension",
+      "order": 6,
+      "status": "planned",
+      "predecessor": "actions",
+      "acceptance_gates": [
+        {
+          "id": "PH-SELF-G1",
+          "description": "Tool Factory generation, quarantine, benchmark, shadow, canary, and rollback gates pass.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    },
+    {
+      "id": "evolution",
+      "name": "Evolution",
+      "order": 7,
+      "status": "planned",
+      "predecessor": "self_extension",
+      "acceptance_gates": [
+        {
+          "id": "PH-EVO-G1",
+          "description": "Mutation Engine, architecture experiments, statistical comparison, canary, rollback, and human-policy gates pass before autonomous evolution is enabled.",
+          "hard": true,
+          "status": "PENDING",
+          "evidence": []
+        }
+      ],
+      "autonomous_capability_allowed": false
+    }
+  ]
+}
