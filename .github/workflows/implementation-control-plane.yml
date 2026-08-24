@@ -33,13 +33,13 @@ jobs:
         run: python -m unittest discover -s tests/control_plane -p 'test_*.py' -v
 
       - name: Verify implementation control state
-        run: python scripts/control_plane.py verify
+        run: python scripts/control_plane_policy.py verify
 
       - name: Generate implementation report
         if: always()
         run: |
-          if [ -f scripts/control_plane.py ]; then
-            python scripts/control_plane.py report > control-plane-report.md || true
+          if [ -f scripts/control_plane_policy.py ]; then
+            python scripts/control_plane_policy.py report > control-plane-report.md || true
           else
             printf '# Continuum Implementation Control Plane\n\nVerifier is not implemented yet.\n' > control-plane-report.md
           fi
