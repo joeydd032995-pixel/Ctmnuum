@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 
 from scripts.control_plane import eligible_work_packages, load_control_state, verify_repository
+from scripts.control_plane_policy import policy_errors, strict_eligible_work_packages
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -65,9 +66,34 @@ def _seed_minimal_repo(root: Path) -> None:
     (root / "docs/implementation/work-packages").mkdir(parents=True, exist_ok=True)
 
 
+def _package(
+    package_id: str,
+    *,
+    phase: str = "foundation",
+    status: str = "planned",
+    dependencies: list[str] | None = None,
+    blockers: list[str] | None = None,
+    gates: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "id": package_id,
+        "phase": phase,
+        "title": package_id,
+        "status": status,
+        "risk": "low",
+        "approval_required": False,
+        "source_requirements": ["REQ-001"],
+        "dependencies": dependencies or [],
+        "acceptance_gates": gates or [],
+        "blockers": blockers or [],
+        "rollback": "revert commit",
+    }
+
+
 class RepositoryContractTests(unittest.TestCase):
     def test_repository_control_state_is_valid(self) -> None:
-        errors = verify_repository(ROOT)
+        errors = verify_repository(ROOT) + policy_errors(load_control_state(ROOT))
         self.assertEqual(errors, [], "\n".join(errors))
 
     def test_complete_package_requires_hard_gate_evidence(self) -> None:
@@ -76,17 +102,10 @@ class RepositoryContractTests(unittest.TestCase):
             _seed_minimal_repo(root)
             _write_json(
                 root / "docs/implementation/work-packages/FND-001.json",
-                {
-                    "schema_version": 1,
-                    "id": "FND-001",
-                    "phase": "foundation",
-                    "title": "Fixture",
-                    "status": "complete",
-                    "risk": "low",
-                    "approval_required": False,
-                    "source_requirements": ["REQ-001"],
-                    "dependencies": [],
-                    "acceptance_gates": [
+                _package(
+                    "FND-001",
+                    status="complete",
+                    gates=[
                         {
                             "id": "FND-001-G1",
                             "description": "Must prove completion",
@@ -95,9 +114,7 @@ class RepositoryContractTests(unittest.TestCase):
                             "evidence": [],
                         }
                     ],
-                    "blockers": [],
-                    "rollback": "revert commit",
-                },
+                ),
             )
             errors = verify_repository(root)
             self.assertTrue(any("evidence" in error.lower() for error in errors), errors)
@@ -106,24 +123,14 @@ class RepositoryContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             _seed_minimal_repo(root)
-            for package_id, dependency in (("FND-A", "FND-B"), ("FND-B", "FND-A")):
-                _write_json(
-                    root / f"docs/implementation/work-packages/{package_id}.json",
-                    {
-                        "schema_version": 1,
-                        "id": package_id,
-                        "phase": "foundation",
-                        "title": package_id,
-                        "status": "planned",
-                        "risk": "low",
-                        "approval_required": False,
-                        "source_requirements": ["REQ-001"],
-                        "dependencies": [dependency],
-                        "acceptance_gates": [],
-                        "blockers": [],
-                        "rollback": "revert commit",
-                    },
-                )
+            _write_json(
+                root / "docs/implementation/work-packages/FND-A.json",
+                _package("FND-A", dependencies=["FND-B"]),
+            )
+            _write_json(
+                root / "docs/implementation/work-packages/FND-B.json",
+                _package("FND-B", dependencies=["FND-A"]),
+            )
             errors = verify_repository(root)
             self.assertTrue(any("cycle" in error.lower() for error in errors), errors)
 
@@ -135,40 +142,30 @@ class RepositoryContractTests(unittest.TestCase):
             evidence.parent.mkdir(parents=True, exist_ok=True)
             evidence.write_text("passed\n", encoding="utf-8")
 
-            packages = [
-                ("FND-A", "complete", []),
-                ("FND-B", "ready", ["FND-A"]),
-                ("FND-C", "planned", ["FND-B"]),
-            ]
-            for package_id, status, dependencies in packages:
-                gates = []
-                if status == "complete":
-                    gates = [
+            _write_json(
+                root / "docs/implementation/work-packages/FND-A.json",
+                _package(
+                    "FND-A",
+                    status="complete",
+                    gates=[
                         {
-                            "id": f"{package_id}-G1",
+                            "id": "FND-A-G1",
                             "description": "done",
                             "hard": True,
                             "status": "PASS",
                             "evidence": [{"path": "docs/implementation/evidence/A.md"}],
                         }
-                    ]
-                _write_json(
-                    root / f"docs/implementation/work-packages/{package_id}.json",
-                    {
-                        "schema_version": 1,
-                        "id": package_id,
-                        "phase": "foundation",
-                        "title": package_id,
-                        "status": status,
-                        "risk": "low",
-                        "approval_required": False,
-                        "source_requirements": ["REQ-001"],
-                        "dependencies": dependencies,
-                        "acceptance_gates": gates,
-                        "blockers": [],
-                        "rollback": "revert commit",
-                    },
-                )
+                    ],
+                ),
+            )
+            _write_json(
+                root / "docs/implementation/work-packages/FND-B.json",
+                _package("FND-B", status="ready", dependencies=["FND-A"]),
+            )
+            _write_json(
+                root / "docs/implementation/work-packages/FND-C.json",
+                _package("FND-C", dependencies=["FND-B"]),
+            )
 
             state = load_control_state(root)
             eligible = eligible_work_packages(state)
@@ -186,10 +183,78 @@ class RepositoryContractTests(unittest.TestCase):
             errors = verify_repository(root)
             self.assertTrue(any("predecessor" in error.lower() for error in errors), errors)
 
+    def test_complete_package_cannot_bypass_phase_activation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            evidence = root / "docs/implementation/evidence/A.md"
+            evidence.parent.mkdir(parents=True, exist_ok=True)
+            evidence.write_text("passed\n", encoding="utf-8")
+            _write_json(
+                root / "docs/implementation/work-packages/RSN-001.json",
+                _package(
+                    "RSN-001",
+                    phase="reasoning",
+                    status="complete",
+                    gates=[
+                        {
+                            "id": "RSN-001-G1",
+                            "description": "done",
+                            "hard": True,
+                            "status": "PASS",
+                            "evidence": [{"path": "docs/implementation/evidence/A.md"}],
+                        }
+                    ],
+                ),
+            )
+            state = load_control_state(root)
+            errors = policy_errors(state)
+            self.assertTrue(any("inactive phase" in error.lower() for error in errors), errors)
+
+    def test_open_source_gap_automatically_blocks_registered_package(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            _write_json(
+                root / "docs/implementation/source-gaps.json",
+                {
+                    "schema_version": 1,
+                    "source_gaps": [
+                        {
+                            "id": "SRC-TEST",
+                            "description": "fixture gap",
+                            "status": "open",
+                            "severity": "high",
+                            "blocks": ["FND-B"],
+                            "tracking": "https://example.invalid/gap",
+                        }
+                    ],
+                },
+            )
+            _write_json(
+                root / "docs/implementation/work-packages/FND-B.json",
+                _package("FND-B", status="ready"),
+            )
+            state = load_control_state(root)
+            errors = policy_errors(state)
+            self.assertTrue(any("source gap" in error.lower() for error in errors), errors)
+            self.assertEqual(strict_eligible_work_packages(state), [])
+
+    def test_phase_chain_must_match_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            phases_path = root / "docs/implementation/phases.json"
+            payload = json.loads(phases_path.read_text(encoding="utf-8"))
+            payload["phases"][1]["predecessor"] = None
+            _write_json(phases_path, payload)
+            errors = policy_errors(load_control_state(root))
+            self.assertTrue(any("predecessor chain" in error.lower() for error in errors), errors)
+
     def test_completed_control_plane_unlocks_temporal_foundation(self) -> None:
         state = load_control_state(ROOT)
         self.assertEqual(state.work_packages["FND-CTRL-001"]["status"], "complete")
-        eligible = {item["id"] for item in eligible_work_packages(state)}
+        eligible = {item["id"] for item in strict_eligible_work_packages(state)}
         self.assertIn("FND-TEMP-001", eligible)
 
 
