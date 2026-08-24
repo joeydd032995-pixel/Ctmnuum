@@ -186,6 +186,12 @@ class RepositoryContractTests(unittest.TestCase):
             errors = verify_repository(root)
             self.assertTrue(any("predecessor" in error.lower() for error in errors), errors)
 
+    def test_completed_control_plane_unlocks_temporal_foundation(self) -> None:
+        state = load_control_state(ROOT)
+        self.assertEqual(state.work_packages["FND-CTRL-001"]["status"], "complete")
+        eligible = {item["id"] for item in eligible_work_packages(state)}
+        self.assertIn("FND-TEMP-001", eligible)
+
 
 if __name__ == "__main__":
     unittest.main()
