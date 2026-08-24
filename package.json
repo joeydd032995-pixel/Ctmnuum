@@ -1,0 +1,11 @@
+{
+  "name": "ctmnuum",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.16.0 <23"
+  },
+  "scripts": {
+    "verify:structure": "python scripts/verify_structure.py"
+  }
+}
