@@ -1,0 +1,28 @@
+name: Foundation Structure
+
+on:
+  push:
+    branches:
+      - feat/foundation-phase-1
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify-foundation-structure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Verify required repository structure
+        run: python scripts/verify_structure.py
