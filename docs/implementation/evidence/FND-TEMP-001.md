@@ -146,3 +146,47 @@ explicit human routing decision after replay and health verification.
 The PR remains draft and automatic merge remains disabled. The final
 self-hosting CI run after this evidence and the completed work-package record
 are committed must pass before the PR can be considered for human review.
+
+## Post-completion correction — Continue-As-New thresholds
+
+Gate `FND-TEMP-G3` was recorded `PASS` on the claim that Continue-As-New
+thresholds were "encoded and tested". Subsequent repository review found the
+encoded values did not match the v1.2 Temporal execution contract, and that the
+test backing the claim could not detect the discrepancy.
+
+### Defect
+
+`CONTINUE_AS_NEW` was `max_events=100_000, max_age_seconds=7 * 24 * 3600`.
+Temporal terminates a Workflow Execution once its Event History exceeds 51,200
+events, so the Continue-As-New branch was unreachable on event count: a
+long-running Workflow would be terminated by the server rather than continuing.
+The v1.2 contract specifies `>8,000` history events or recurring execution
+`>24h`, with 8,000 chosen as a conservative Continuum threshold that preserves
+headroom below the platform limit.
+
+### Faulty evidence
+
+`test_continue_as_new_thresholds_are_exact` asserted the boundary using
+`CONTINUE_AS_NEW.max_events` and `CONTINUE_AS_NEW.max_age_seconds` as its own
+inputs. A boundary asserted in terms of the constant that defines it holds for
+any value, so the test passed against the incorrect thresholds. The companion
+assertion in `test_temporal_foundation.py` checked only `> 0`.
+
+### Correction
+
+- `CONTINUE_AS_NEW` is now `max_events=8_000, max_age_seconds=24 * 3600`.
+- `TEMPORAL_HISTORY_TERMINATION_EVENTS = 51_200` is named explicitly, and
+  `ContinueAsNewPolicy.__post_init__` rejects any threshold at or above it. An
+  unreachable Continue-As-New policy now fails at import rather than silently.
+- `test_continue_as_new_thresholds_match_the_v12_contract` asserts literal
+  values; `test_continue_as_new_threshold_stays_below_temporal_termination`
+  guards the platform limit; `test_continue_as_new_boundary_behavior` asserts
+  the 7,999/8,000 and 86,399/86,400 boundaries directly.
+
+Both regressions were verified to fail against the previous values: 100,000 is
+rejected at import, and an off-spec-but-legal 20,000 fails the literal and
+boundary assertions.
+
+This correction does not re-open the work package. It records that
+`FND-TEMP-G3`'s original evidence was insufficient and that the gate's stated
+claim is now actually enforced.
