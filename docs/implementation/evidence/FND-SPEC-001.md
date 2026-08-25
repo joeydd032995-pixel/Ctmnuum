@@ -101,8 +101,13 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
 11. A promoted tool version cannot lack an immutable image digest.
 12. A risk-3/4 execution cannot be recorded without an approval.
 13. Built-in agents remain readable under the tenant policy.
+14. An oversized JSONB payload is rejected by the `jsonb_256k` domain.
+15. `memories.search_tsv` is generated and matches a full-text query.
+16. The event hash chain is computed server-side and follows `sequence` order,
+    including for several events written inside one transaction.
+17. A forged `previous_hash` is rejected rather than silently overwritten.
 
-Assertions 6–13 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–17 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -120,7 +125,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–13
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–17
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
 - Artifact §8 lists every `[DECISION]` requiring ADR approval
@@ -184,6 +189,46 @@ The highest-priority decision is the **event hash canonicalisation** (artifact
 §4.2). The original byte layout is unknown, and changing it after any event is
 written invalidates every existing chain — so it must be fixed by ADR before the
 event store takes its first write.
+
+## Second round: an independently produced candidate DDL
+
+A second reconstruction of the same missing artifact was supplied for
+comparison. Rather than review it by reading, it was applied to the same
+PostgreSQL 18 + pgvector image in CI alongside a probe that exercised its event
+store and tenant isolation. Three defects surfaced, all of them by execution:
+
+| # | Defect | How it fails |
+|---:|---|---|
+| 1 | `SECURITY DEFINER` hash trigger calls `digest()` with `search_path` set to `pg_catalog, continuum` | `pgcrypto` installs `digest()` into `public`, which that path excludes. The function is unreachable, so the event store cannot accept a single row. |
+| 2 | 25 tenant tables take `workspace_id` from a session GUC with no default and no fallback | `not_null_violation` on every insert that does not set the GUC first. |
+| 3 | Chain head selected by `ingested_at` | Three events written in one transaction share one `now()`, so the tiebreak falls to a random UUID. The chain links, but its order is not reconstructible. |
+
+Defect 1 is the instructive one: it is invisible to a reader, because the
+function body and the `search_path` hardening are individually correct and are
+declared far apart. Only executing it shows that the combination has no
+`digest()` in scope.
+
+### What the candidate got right, and what was taken from it
+
+Four of its ideas were genuinely better than the first reconstruction and are
+adopted here:
+
+| Adopted | Why |
+|---|---|
+| `continuum.jsonb_256k` domain on `events.payload`, `evidence.payload`, `artifacts.metadata` | v1.2 bounds payload size in prose; the first reconstruction left it unbounded. |
+| `search_tsv` as `GENERATED ALWAYS AS (to_tsvector('english', content)) STORED` | The column was declared and indexed but never populated — the index could not match anything. |
+| Server-side `events_prepare_hash()` | Moves canonicalisation off the application, where every writer had to agree on it independently. |
+| `events_reject_truncate` | `TRUNCATE` bypasses row-level triggers, so append-only was enforceable only against `UPDATE`/`DELETE`. |
+
+Each was reimplemented rather than copied, so that defects 1–3 are not carried
+across: the hash trigger uses the builtin `pg_catalog.sha256(bytea)` — no
+extension, hardening preserved — and orders the chain head by the `bigserial`
+`sequence` under an advisory lock rather than by timestamp.
+
+The candidate's level-4 tool comment was checked against this schema and
+required no change: both files enforce the same rule (risk ≥ 3 requires
+approval), and the comment warns against a table-level ban on *active* level-4
+tools that this schema never imposed.
 
 ## Safety and rollback
 
