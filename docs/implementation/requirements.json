@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "requirements": [
+    {
+      "id": "CONT-V12-GOV-001",
+      "statement": "Implementation phases MUST advance in dependency order and a phase MUST NOT advance beyond its hard acceptance gate until that gate passes.",
+      "level": "MUST",
+      "source": "Continuum v1.2 Phase-by-Phase Execution Plan — phase order and hard acceptance gates",
+      "source_kind": "v1.2",
+      "status": "active"
+    },
+    {
+      "id": "CONT-V12-GOV-002",
+      "statement": "Advanced autonomous components MUST remain disabled until foundational evidence, safety, evaluation, and rollback systems are proven.",
+      "level": "MUST",
+      "source": "Continuum v1.2 Phase-by-Phase Execution Plan — controlled activation of Watchers, Tool Factory, Mutation Engine, and autonomous improvement",
+      "source_kind": "v1.2",
+      "status": "active"
+    },
+    {
+      "id": "CONT-V12-GOV-003",
+      "statement": "Major implementation subsystems MUST have objective acceptance criteria and machine-verifiable evidence where practical before being treated as complete.",
+      "level": "MUST",
+      "source": "Continuum v1.2 Phase-by-Phase Execution Plan — hard acceptance gates and machine-verifiable checks",
+      "source_kind": "v1.2",
+      "status": "active"
+    },
+    {
+      "id": "CONT-V12-TEMP-001",
+      "statement": "Foundation MUST establish Temporal as the durable execution layer with deterministic workflow boundaries before higher-level reasoning capabilities depend on it.",
+      "level": "MUST",
+      "source": "Continuum v1.2 Master Implementation Specification — Temporal orchestration boundary and Foundation sequence",
+      "source_kind": "v1.2",
+      "status": "active"
+    },
+    {
+      "id": "CONT-LOCAL-GOV-001",
+      "statement": "An implementation choice that is not directly supported by recovered v1.2 source material MUST be recorded as an ADR or source gap instead of being represented as recovered specification text.",
+      "level": "MUST",
+      "source": "Approved Continuum implementation-control policy and GitHub issue #2",
+      "source_kind": "local-policy",
+      "status": "active"
+    },
+    {
+      "id": "CONT-LOCAL-GOV-002",
+      "statement": "The implementation control plane MUST provide evidence and status but MUST NOT auto-merge pull requests; merge remains a human-controlled gate.",
+      "level": "MUST",
+      "source": "Approved Implementation Control Plane design",
+      "source_kind": "local-policy",
+      "status": "active"
+    }
+  ]
+}

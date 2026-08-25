@@ -1,0 +1,76 @@
+name: Implementation Control Plane
+
+on:
+  push:
+    branches:
+      - main
+      - 'feat/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  verify-control-plane:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Run control-plane unit tests
+        run: python -m unittest discover -s tests/control_plane -p 'test_*.py' -v
+
+      - name: Verify implementation control state
+        run: python -m scripts.control_plane_policy verify
+
+      - name: Generate implementation report
+        if: always()
+        run: |
+          if [ -f scripts/control_plane_policy.py ]; then
+            python -m scripts.control_plane_policy report > control-plane-report.md || true
+          else
+            printf '# Continuum Implementation Control Plane\n\nVerifier is not implemented yet.\n' > control-plane-report.md
+          fi
+
+      - name: Upload implementation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: implementation-control-plane-report
+          path: control-plane-report.md
+
+      - name: Publish PR control-plane status
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- continuum-control-plane-status -->';
+            const report = fs.readFileSync('control-plane-report.md', 'utf8');
+            const body = `${marker}\n${report}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number,
+              per_page: 100,
+            });
+            const prior = comments.find((comment) => comment.body && comment.body.includes(marker));
+            if (prior) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: prior.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

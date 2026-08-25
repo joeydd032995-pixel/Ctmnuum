@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "source_gaps": [
+    {
+      "id": "SRC-001",
+      "description": "The standalone machine-readable Continuum v1.2 core implementation artifact referenced by the deep-research report is not currently available in the repository, conversation files, or Library.",
+      "status": "open",
+      "severity": "high",
+      "blocks": [
+        "FND-DB-DOMAIN"
+      ],
+      "tracking": "https://github.com/joeydd032995-pixel/Ctmnuum/issues/2"
+    }
+  ]
+}
