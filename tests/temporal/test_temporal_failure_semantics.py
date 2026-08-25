@@ -99,9 +99,12 @@ class TemporalFailureSemanticsTests(unittest.TestCase):
             ContinueAsNewPolicy(max_events=100_000, max_age_seconds=24 * 3600)
 
     def test_continue_as_new_boundary_behavior(self) -> None:
+        # The contract is strictly greater-than, so the threshold value itself
+        # must not trigger; only the first value beyond it does.
         self.assertFalse(should_continue_as_new(event_count=7_999, age_seconds=86_399))
-        self.assertTrue(should_continue_as_new(event_count=8_000, age_seconds=0))
-        self.assertTrue(should_continue_as_new(event_count=0, age_seconds=86_400))
+        self.assertFalse(should_continue_as_new(event_count=8_000, age_seconds=86_400))
+        self.assertTrue(should_continue_as_new(event_count=8_001, age_seconds=0))
+        self.assertTrue(should_continue_as_new(event_count=0, age_seconds=86_401))
 
     def test_long_running_policy_is_explicitly_cancellable(self) -> None:
         self.assertTrue(ACTIVITY_POLICIES["long_running"].cancellable)

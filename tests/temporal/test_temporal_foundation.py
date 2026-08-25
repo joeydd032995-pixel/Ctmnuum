@@ -99,8 +99,8 @@ class TemporalFoundationContractTests(unittest.TestCase):
         from services.orchestrator.temporal.workflows import should_continue_as_new
 
         self.assertFalse(should_continue_as_new(event_count=1, age_seconds=1))
-        self.assertTrue(should_continue_as_new(event_count=8_000, age_seconds=1))
-        self.assertTrue(should_continue_as_new(event_count=1, age_seconds=24 * 3600))
+        self.assertTrue(should_continue_as_new(event_count=8_001, age_seconds=1))
+        self.assertTrue(should_continue_as_new(event_count=1, age_seconds=24 * 3600 + 1))
 
 
 if __name__ == "__main__":

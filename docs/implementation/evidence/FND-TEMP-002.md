@@ -94,6 +94,45 @@ Ran 7 tests ... FAILED (failures=2)
 This second case is the one the platform guard alone would not catch, and is
 why the literal and boundary assertions exist alongside it.
 
+## Review finding — threshold comparison was not strict
+
+Automated review on the pull request identified that `should_continue_as_new`
+compares with `>=`:
+
+```python
+event_count >= CONTINUE_AS_NEW.max_events
+or age_seconds >= CONTINUE_AS_NEW.max_age_seconds
+```
+
+The v1.2 contract is strict — Continue-As-New *above* 8,000 history events or
+*above* 24h of recurring execution. With `>=`, an execution at exactly 8,000
+events or exactly 86,400 seconds triggers one event and one second early, at the
+threshold rather than beyond it.
+
+The `>=` comparison predates this package, but this package is what documented
+the threshold as `>8,000` / `>24h` and added boundary assertions at exactly
+8,000 and 86,400 — which would have locked the off-by-one in as intended
+behavior. The finding is accepted.
+
+`should_continue_as_new` now uses strict `>`, and the boundary assertions are
+corrected: the threshold value itself must not trigger, and only the first value
+beyond it does.
+
+```
+events= 8000 age=     0 -> False
+events= 8001 age=     0 -> True
+events=    0 age= 86400 -> False
+events=    0 age= 86401 -> True
+```
+
+The helper is not yet wired into `FoundationWorkflow`, so the change has no
+runtime effect on any executing Workflow; it is a contract-fidelity correction.
+
+The platform guard in `ContinueAsNewPolicy.__post_init__` keeps `>=` against
+`TEMPORAL_HISTORY_TERMINATION_EVENTS`, which remains correct: a threshold equal
+to the termination limit would only fire above it, and is therefore still
+unreachable.
+
 ## Gate evidence
 
 ### FND-TEMP2-G1 — contract-correct thresholds, literally asserted
