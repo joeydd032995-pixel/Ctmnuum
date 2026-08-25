@@ -862,7 +862,12 @@ BEGIN
         'occurred_at', NEW.occurred_at
     );
 
-    calculated_hash := encode(digest(hash_document::text, 'sha256'), 'hex');
+    -- PROBE FIX: the candidate called pgcrypto's digest(), but this function
+    -- is SECURITY DEFINER with search_path = pg_catalog, continuum, and
+    -- pgcrypto installs digest() into public. The builtin sha256(bytea)
+    -- lives in pg_catalog, so it needs no extension and keeps the
+    -- hardened search_path intact.
+    calculated_hash := encode(sha256(convert_to(hash_document::text, 'UTF8')), 'hex');
 
     IF NEW.event_hash IS NOT NULL AND NEW.event_hash <> calculated_hash THEN
         RAISE EXCEPTION 'event_hash does not match canonical event document'
