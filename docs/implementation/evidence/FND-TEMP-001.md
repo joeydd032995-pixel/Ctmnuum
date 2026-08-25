@@ -190,3 +190,7 @@ boundary assertions.
 This correction does not re-open the work package. It records that
 `FND-TEMP-G3`'s original evidence was insufficient and that the gate's stated
 claim is now actually enforced.
+
+The correction is tracked as its own work package, `FND-TEMP-002`, with its own
+hard gates and evidence: `docs/implementation/work-packages/FND-TEMP-002.json`
+and `docs/implementation/evidence/FND-TEMP-002.md`.
