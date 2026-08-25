@@ -312,4 +312,116 @@ BEGIN
 END
 $$;
 
+-- 14. The >256 KiB offload rule is enforced by the type, not by convention  [V12]
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'OversizeEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('blob', repeat('x', 300000)), now()
+        );
+        RAISE EXCEPTION 'a >256 KiB payload was accepted inline';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'oversized JSONB payload rejected: enforced';
+    END;
+END
+$$;
+
+-- 15. Lexical retrieval actually has something to match against        [DERIVED]
+INSERT INTO continuum.memories (id, workspace_id, memory_type, content, content_hash)
+VALUES ('00000000-0000-0000-0000-0000000000c9', '00000000-0000-0000-0000-0000000000aa',
+        'semantic', 'the falsifier caught a seeded hypothesis', repeat('0', 64));
+
+DO $$
+DECLARE hits integer;
+BEGIN
+    SELECT count(*) INTO hits
+      FROM continuum.memories
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+       AND search_tsv @@ to_tsquery('english', 'falsifier & hypothesis');
+    IF hits <> 1 THEN
+        RAISE EXCEPTION 'generated search_tsv did not match (% hits)', hits;
+    END IF;
+    RAISE NOTICE 'generated search_tsv is populated and matches';
+END
+$$;
+
+-- 16. The event hash chain is computed server-side and is reconstructible [DERIVED]
+DO $$
+DECLARE
+    i integer;
+    total integer;
+    broken integer;
+    ordered integer;
+BEGIN
+    -- three events in ONE transaction: the case that defeats ingested_at ordering
+    FOR i IN 1..3 LOOP
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'ChainEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('seq', i), now()
+        );
+    END LOOP;
+
+    SELECT count(*) INTO total
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa';
+
+    -- every non-genesis event must chain to the event immediately before it
+    -- in sequence order; this is what a random-uuid tiebreak cannot guarantee
+    SELECT count(*) INTO broken
+      FROM (
+        SELECT event_hash, previous_hash,
+               lag(event_hash) OVER (ORDER BY sequence) AS prior
+          FROM continuum.events
+         WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+      ) c
+     WHERE c.prior IS NOT NULL AND c.previous_hash IS DISTINCT FROM c.prior;
+
+    IF broken <> 0 THEN
+        RAISE EXCEPTION 'hash chain does not follow sequence order (% breaks)', broken;
+    END IF;
+
+    SELECT count(*) INTO ordered
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+       AND event_hash IS NOT NULL;
+    IF ordered <> total THEN
+        RAISE EXCEPTION 'some events have no computed hash';
+    END IF;
+
+    RAISE NOTICE 'hash chain: % events, computed server-side, follows sequence order', total;
+END
+$$;
+
+-- 17. A caller cannot write an event whose previous_hash contradicts the chain [DERIVED]
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload,
+            previous_hash, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'ForgedEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            '{}'::jsonb, repeat('f', 64), now()
+        );
+        RAISE EXCEPTION 'an event with a forged previous_hash was accepted';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'forged previous_hash rejected: enforced';
+    END;
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;
