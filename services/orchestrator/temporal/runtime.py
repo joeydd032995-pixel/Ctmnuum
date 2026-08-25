@@ -10,6 +10,8 @@ from services.orchestrator.temporal.contracts import ActivityContext, WorkflowRe
 from services.orchestrator.temporal.policies import ACTIVITY_POLICIES
 from services.orchestrator.temporal.workflows import validate_workflow_request
 
+FOUNDATION_TASK_QUEUE = "continuum.foundation"
+
 
 @activity.defn(name="continuum.foundation.execute")
 async def _foundation_execute(
