@@ -1,0 +1,63 @@
+name: Derived Core Schema
+
+# Validates that the DERIVED reconstruction of the v1.2 core artifact is
+# executable PostgreSQL 18 + pgvector, and that the v1.2 invariants it claims to
+# encode are actually enforced by the schema.
+#
+# This validates the reconstruction as a document. It does NOT adopt it as the
+# production schema: FND-DB-DOMAIN remains blocked by SRC-001 until the
+# decisions listed in the artifact's traceability section are approved by ADR.
+
+on:
+  push:
+    branches:
+      - main
+      - 'claude/**'
+      - 'feat/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  verify-derived-schema:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-trixie
+        env:
+          POSTGRES_DB: continuum_derived
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d continuum_derived"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGDATABASE: continuum_derived
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply derived core schema
+        run: psql -v ON_ERROR_STOP=1 -f docs/spec/continuum_v1.2_core_schema.derived.sql
+
+      - name: Verify derived schema invariants
+        run: psql -v ON_ERROR_STOP=1 -f docs/spec/continuum_v1.2_core_schema.derived.verify.sql
