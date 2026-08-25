@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "id": "FND-SPEC-001",
+  "phase": "foundation",
+  "title": "Derived reconstruction of the v1.2 core implementation artifact",
+  "status": "complete",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-003",
+    "CONT-LOCAL-GOV-001"
+  ],
+  "dependencies": [
+    "FND-CTRL-002"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-SPEC-G1",
+      "description": "A replacement core artifact exists under docs/spec/ with per-declaration provenance tagging, and no element is presented as recovered v1.2 specification text.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/spec/Continuum_v1.2_Core_Implementation_Artifact.derived.md"
+        },
+        {
+          "path": "docs/implementation/evidence/FND-SPEC-001.md"
+        }
+      ]
+    },
+    {
+      "id": "FND-SPEC-G2",
+      "description": "The reconstructed DDL is executable against PostgreSQL 18 with pgvector, and all 25 tables named by v1.2 materialize.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/spec/continuum_v1.2_core_schema.derived.sql"
+        },
+        {
+          "path": "docs/spec/continuum_v1.2_core_schema.derived.verify.sql"
+        },
+        {
+          "path": ".github/workflows/derived-core-schema.yml"
+        }
+      ]
+    },
+    {
+      "id": "FND-SPEC-G3",
+      "description": "v1.2 hard invariants are enforced by the schema rather than described in prose: the event store rejects UPDATE and DELETE; RLS is enabled and forced on every tenant-scoped table; tenant context fails closed; child rows cannot reference a parent owned by another workspace; a risk-3/4 tool execution cannot be recorded without an approval; a promoted tool version cannot lack an immutable digest; and a mutation cannot reach promoted with a null approver. Recording an approver is a structural guard against accidental or unattended promotion, not an authorization boundary: the foreign key proves the user exists, not that the user approved. Binding promotion to an authenticated approval path is an outstanding decision.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/spec/continuum_v1.2_core_schema.derived.verify.sql"
+        },
+        {
+          "path": "docs/implementation/evidence/FND-SPEC-001.md"
+        }
+      ]
+    },
+    {
+      "id": "FND-SPEC-G4",
+      "description": "Every declaration without source support is enumerated in the artifact's traceability section, generated from the [DECISION] tags in the executable schema so the list cannot drift from it, and the artifact explicitly does not close SRC-001 or unblock FND-DB-DOMAIN.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/spec/Continuum_v1.2_Core_Implementation_Artifact.derived.md"
+        },
+        {
+          "path": "docs/implementation/source-gaps.json"
+        }
+      ]
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the docs/spec commits and the derived-core-schema workflow. No production schema, migration, or cloud resource is created by this package, so rollback has no data implications."
+}
