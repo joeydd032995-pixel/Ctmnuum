@@ -1,0 +1,53 @@
+name: Candidate DDL Probe
+
+# Temporary evaluation harness. Applies an independently-produced candidate
+# core DDL to PostgreSQL 18 + pgvector and probes two suspected defects by
+# executing them. Removed once the evaluation is folded into the artifact.
+
+on:
+  push:
+    branches:
+      - 'claude/evaluate-candidate-ddl'
+
+permissions:
+  contents: read
+
+jobs:
+  probe-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.6-pg18-trixie
+        env:
+          POSTGRES_DB: candidate_probe
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d candidate_probe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      PGHOST: localhost
+      PGPORT: '5432'
+      PGDATABASE: candidate_probe
+      PGUSER: postgres
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Apply candidate core DDL
+        run: psql -v ON_ERROR_STOP=1 -f docs/spec/candidate/candidate_core_ddl.sql
+
+      - name: Probe suspected defects
+        run: psql -v ON_ERROR_STOP=1 -f docs/spec/candidate/probe.sql
