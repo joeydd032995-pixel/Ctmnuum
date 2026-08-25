@@ -4,20 +4,21 @@ from datetime import timedelta
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, VersioningBehavior
+from temporalio.exceptions import ApplicationError
 
 from services.orchestrator.temporal.activities import (
     build_activity_context,
     execute_foundation_activity,
 )
 from services.orchestrator.temporal.contracts import ActivityContext, WorkflowRequest, WorkflowResult
-from services.orchestrator.temporal.policies import ACTIVITY_POLICIES
+from services.orchestrator.temporal.policies import (
+    ACTIVITY_POLICIES,
+    FOUNDATION_TASK_QUEUE,
+)
 from services.orchestrator.temporal.workflows import (
     FOUNDATION_ACTIVITY_CONTEXT_V1_PATCH,
     validate_workflow_request,
 )
-
-FOUNDATION_TASK_QUEUE = "continuum.foundation"
-
 
 def activity_execution_options(policy_name: str) -> dict[str, object]:
     policy = ACTIVITY_POLICIES[policy_name]
@@ -64,7 +65,14 @@ class FoundationActivity:
 class FoundationWorkflow:
     @workflow.run
     async def run(self, request: WorkflowRequest) -> WorkflowResult:
-        validate_workflow_request(request)
+        try:
+            validate_workflow_request(request)
+        except ValueError as exc:
+            raise ApplicationError(
+                str(exc),
+                type="continuum.validation",
+                non_retryable=True,
+            ) from None
         activity_context_version = (
             "v1" if workflow.patched(FOUNDATION_ACTIVITY_CONTEXT_V1_PATCH) else None
         )

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 
+from temporalio.client import WorkflowFailureError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
@@ -39,6 +42,39 @@ class TemporalExecutionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.run_id, request.run_id)
         self.assertEqual(result.task_id, request.task_id)
         self.assertIn("workspace-1:run-1:task-1", result.artifact_ref)
+
+    async def test_invalid_request_fails_execution_without_workflow_task_retry_loop(
+        self,
+    ) -> None:
+        async with await WorkflowEnvironment.start_time_skipping() as env:
+            async with Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[FoundationWorkflow],
+                activities=[FoundationActivity.execute],
+            ):
+                handle = await env.client.start_workflow(
+                    FoundationWorkflow.run,
+                    WorkflowRequest(
+                        workspace_id="",
+                        run_id="run-invalid",
+                        task_id="task-invalid",
+                        objective="reject invalid workflow input",
+                    ),
+                    id="fnd-temp-invalid-request",
+                    task_queue=FOUNDATION_TASK_QUEUE,
+                )
+                try:
+                    await asyncio.wait_for(handle.result(), timeout=1)
+                except WorkflowFailureError as failure:
+                    cause = failure.cause
+                    self.assertIsInstance(cause, ApplicationError)
+                    self.assertEqual(cause.type, "continuum.validation")
+                    self.assertTrue(cause.non_retryable)
+                except TimeoutError:
+                    self.fail("invalid input left the Workflow Task retrying")
+                else:
+                    self.fail("invalid input unexpectedly completed")
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ PERMANENT_ACTIVITY_ERROR_TYPES: tuple[str, ...] = (
     "continuum.policy_denied",
     "continuum.permanent",
 )
+FOUNDATION_TASK_QUEUE = "continuum.foundation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class WorkerVersioningPolicy:
 
 
 TASK_QUEUES: tuple[str, ...] = (
+    FOUNDATION_TASK_QUEUE,
     "continuum.interactive",
     "continuum.standard",
     "continuum.background",

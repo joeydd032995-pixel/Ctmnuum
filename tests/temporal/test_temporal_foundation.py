@@ -20,8 +20,6 @@ class TemporalFoundationContractTests(unittest.TestCase):
         self.assertEqual(missing, [])
 
     def test_workflow_module_has_no_direct_nondeterministic_io_imports(self) -> None:
-        path = ROOT / "services" / "orchestrator" / "temporal" / "workflows.py"
-        tree = ast.parse(path.read_text(encoding="utf-8"))
         forbidden = {
             "asyncio",
             "requests",
@@ -38,13 +36,26 @@ class TemporalFoundationContractTests(unittest.TestCase):
             "psycopg",
             "asyncpg",
         }
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom) and node.module:
-                imported.add(node.module.split(".")[0])
-        self.assertEqual(sorted(imported & forbidden), [])
+        paths = [
+            ROOT / "services" / "orchestrator" / "temporal" / "workflows.py",
+            ROOT / "services" / "orchestrator" / "temporal" / "runtime.py",
+        ]
+        for path in paths:
+            with self.subTest(path=path.relative_to(ROOT)):
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+                imported: set[str] = set()
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.Import):
+                        imported.update(
+                            alias.name.split(".")[0] for alias in node.names
+                        )
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        root_module = node.module.split(".")[0]
+                        if root_module != "datetime" or any(
+                            alias.name != "timedelta" for alias in node.names
+                        ):
+                            imported.add(root_module)
+                self.assertEqual(sorted(imported & forbidden), [])
 
     def test_policy_module_encodes_required_foundation_controls(self) -> None:
         from services.orchestrator.temporal.policies import (
