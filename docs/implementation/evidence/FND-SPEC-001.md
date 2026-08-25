@@ -95,11 +95,20 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
 5. RLS is both **enabled and forced** on every tenant-scoped table.
 6. The event store rejects `UPDATE` and `DELETE`.
 7. A risk-4 tool version cannot be inserted with `approval_required = false`.
-8. A mutation cannot reach `promoted` without a human approver.
+8. A mutation cannot reach `promoted` with a null approver.
+9. Operational roles carry `NOLOGIN NOBYPASSRLS`, even if pre-provisioned.
+10. A child row cannot reference a parent owned by another workspace.
+11. A promoted tool version cannot lack an immutable image digest.
+12. A risk-3/4 execution cannot be recorded without an approval.
+13. Built-in agents remain readable under the tenant policy.
 
-Assertions 6–8 are the point of the exercise. v1.2 states these as hard gates in
-prose; the reconstruction turns three of them into database constraints that
-fail loudly rather than depending on application code to remember.
+Assertions 6–13 are the point of the exercise. v1.2 states these as hard gates
+in prose; the reconstruction turns them into database constraints that fail
+loudly rather than depending on application code to remember.
+
+Assertion 10 is the sharpest of them: it inserts an embedding in workspace A
+pointing at a memory in workspace B. The v1.2 verbatim single-column foreign key
+accepts that row. The derived composite constraint rejects it.
 
 ## Gate evidence
 
@@ -111,11 +120,55 @@ fail loudly rather than depending on application code to remember.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–8
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–13
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
 - Artifact §8 lists every `[DECISION]` requiring ADR approval
 - `docs/implementation/source-gaps.json` — `SRC-001` remains `open`
+
+## Review round: 11 findings, all accepted
+
+Automated review of the first commit returned eleven P2 findings. All were
+verified against the source and all were correct. Nine were schema or document
+defects; two were over-claims in this package's own gate descriptions.
+
+| # | Finding | Resolution |
+|---:|---|---|
+| 1 | Single-column FKs let a child reference a parent in another workspace | Composite `(workspace_id, id)` FKs on the tenant-scoped pairs |
+| 2 | `approved_by` proves a user exists, not that they approved | Gate G3 corrected; the residual authorization boundary is recorded as a decision |
+| 3 | Event column **types** tagged `[V12]` when v1.2 gives names only | Split into `[V12 name]` + `[DERIVED shape]` |
+| 4 | `bigserial` default needs sequence `USAGE`, not just table `INSERT` | `GRANT USAGE ON SEQUENCE` added |
+| 5 | Nothing required an approval before a risk-3/4 *execution* | Cross-table trigger on `tool_executions` |
+| 6 | Decision list was categorical, not exhaustive | Generated mechanically from `[DECISION]` tags |
+| 7 | A promoted tool version could have a null `image_digest` | CHECK requiring `sha256:<64 hex>` when promoted |
+| 8 | `metric_name` differed between the `.md` and the `.sql` | Aligned; nullable form would have voided the UNIQUE |
+| 9 | Built-in agents (`workspace_id IS NULL`) invisible under the uniform policy | Separate read/write policies for `agents`, `agent_versions` |
+| 10 | Role attributes not reasserted when the role pre-exists | `ALTER ROLE … NOLOGIN NOBYPASSRLS` every run, plus an assertion |
+| 11 | Temporal section pointed at an uncommitted document | Definitions reproduced in full |
+
+### Finding 1 is a defect in the source, not the reconstruction
+
+v1.2's own `memory_embeddings` DDL declares `memory_id REFERENCES memories(id)`
+and `workspace_id REFERENCES workspaces(id)` as **independent** constraints.
+Referential integrity does not require the referenced memory to belong to the
+referencing row's workspace, so the published DDL permits an embedding in
+workspace A to point at a memory in workspace B — while still satisfying the RLS
+predicate on the embedding row itself. That contradicts the v1.2 hard gate of
+zero cross-workspace access.
+
+The verbatim block is left unmodified and the composite constraint is added
+immediately after it as an explicit `ALTER TABLE`, so the reproduced source text
+stays intact and the hardening is visible as a derived addition.
+
+### Findings 2 and 5 were over-claims in this package
+
+`FND-SPEC-G3` originally asserted that "risk-3/4 tools require approval" and
+that promotion required "a human approver". Neither was true as written: the
+`tool_versions` CHECK recorded only that approval was *required*, and
+`approved_by` is a foreign key that proves a user row exists. Finding 5 is now
+genuinely enforced by a trigger. Finding 2 cannot be closed in-schema without an
+authenticated approval path, so the gate text was corrected to say what the
+constraint actually provides rather than what it was claimed to provide.
 
 ## What this package deliberately does not do
 

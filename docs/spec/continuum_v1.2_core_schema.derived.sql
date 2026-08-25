@@ -26,17 +26,21 @@ CREATE SCHEMA IF NOT EXISTS continuum;               -- [V12]
 CREATE EXTENSION IF NOT EXISTS vector;               -- [V12]
 CREATE EXTENSION IF NOT EXISTS citext;               -- [DECISION] case-insensitive email
 
+-- [V12] the application role MUST NOT have BYPASSRLS. Creation alone is not
+-- sufficient: if infrastructure provisioned the role earlier, or it was altered
+-- since, a CREATE-if-absent block silently leaves BYPASSRLS in place while the
+-- schema still reports success. Attributes are therefore reasserted every run.
 DO $$
+DECLARE
+    r text;
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'continuum_app') THEN
-        CREATE ROLE continuum_app NOLOGIN NOBYPASSRLS;           -- [V12] invariant
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'continuum_migration') THEN
-        CREATE ROLE continuum_migration NOLOGIN NOBYPASSRLS;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'continuum_maintenance') THEN
-        CREATE ROLE continuum_maintenance NOLOGIN NOBYPASSRLS;
-    END IF;
+    FOREACH r IN ARRAY ARRAY['continuum_app','continuum_migration','continuum_maintenance'] LOOP
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = r) THEN
+            EXECUTE format('CREATE ROLE %I NOLOGIN NOBYPASSRLS', r);
+        ELSE
+            EXECUTE format('ALTER ROLE %I NOLOGIN NOBYPASSRLS', r);
+        END IF;
+    END LOOP;
 END
 $$;
 
@@ -138,7 +142,9 @@ CREATE TABLE continuum.runs (
     trace_id        char(32) CHECK (trace_id ~ '^[0-9a-f]{32}$'),     -- [V12] pattern
     started_at      timestamptz,                                      -- [DECISION]
     completed_at    timestamptz,                                      -- [DECISION]
-    created_at      timestamptz NOT NULL DEFAULT now()                -- [V11]
+    created_at      timestamptz NOT NULL DEFAULT now()                -- [V11],
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE INDEX runs_workspace_created_idx
@@ -225,7 +231,9 @@ CREATE TABLE continuum.evidence (
     payload             jsonb NOT NULL DEFAULT '{}'::jsonb,           -- [V11]
     payload_artifact_id uuid,                                         -- [V12] >256 KiB to S3
     trace_id            char(32),                                     -- [V11]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11]
+    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11],
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.claims (
@@ -239,15 +247,28 @@ CREATE TABLE continuum.claims (
     assumptions              text[] NOT NULL DEFAULT '{}',            -- [V11]
     falsification_conditions text[] NOT NULL DEFAULT '{}',            -- [V11]
     created_by_agent_version uuid REFERENCES continuum.agent_versions(id),  -- [V11]
-    superseded_by            uuid REFERENCES continuum.claims(id),    -- [DERIVED]
+    superseded_by            uuid,                                    -- [DERIVED]
     trace_id                 char(32),                                -- [V11]
-    created_at               timestamptz NOT NULL DEFAULT now()       -- [V11]
+    created_at               timestamptz NOT NULL DEFAULT now()       -- [V11],
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id),
+    -- [DERIVED] a claim may only be superseded within its own tenant
+    FOREIGN KEY (workspace_id, superseded_by)
+        REFERENCES continuum.claims(workspace_id, id)
 );
 
 CREATE TABLE continuum.claim_evidence (
-    claim_id     uuid NOT NULL REFERENCES continuum.claims(id) ON DELETE CASCADE,
-    evidence_id  uuid NOT NULL REFERENCES continuum.evidence(id) ON DELETE CASCADE,
+    claim_id     uuid NOT NULL,
+    evidence_id  uuid NOT NULL,
     workspace_id uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] composite FKs. A single-column FK proves only that the parent
+    -- row exists; it does NOT prove the parent belongs to this tenant, so a
+    -- caller who knows another workspace's UUID could associate across tenants
+    -- while still satisfying the RLS predicate on this row.
+    FOREIGN KEY (workspace_id, claim_id)
+        REFERENCES continuum.claims(workspace_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, evidence_id)
+        REFERENCES continuum.evidence(workspace_id, id) ON DELETE CASCADE,
     stance       text NOT NULL CHECK (stance IN ('supports','opposes')),  -- [V11]
     weight       double precision CHECK (weight BETWEEN 0 AND 1),     -- [DECISION]
     created_at   timestamptz NOT NULL DEFAULT now(),                  -- [V11]
@@ -270,7 +291,7 @@ CREATE TABLE continuum.memories (
     content_artifact_id uuid,                                         -- [V12] >256 KiB to S3
     status              continuum.memory_status NOT NULL DEFAULT 'temporary',  -- [V12]
     invalidated_at      timestamptz,                                  -- [V12]
-    superseded_by       uuid REFERENCES continuum.memories(id),       -- [V12]
+    superseded_by       uuid,                                         -- [V12]
     valid_from          timestamptz,                                  -- [V12]
     valid_until         timestamptz,                                  -- [V12]
     freshness_class     text NOT NULL DEFAULT 'slow_changing'         -- [V12] half-life classes
@@ -280,7 +301,12 @@ CREATE TABLE continuum.memories (
     source_run_id       uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [DERIVED]
     search_tsv          tsvector,                                     -- [V12] FTS named
     trace_id            char(32),                                     -- [V11]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11]
+    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11],
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id),
+    -- [DERIVED] a memory may only be superseded within its own tenant
+    FOREIGN KEY (workspace_id, superseded_by)
+        REFERENCES continuum.memories(workspace_id, id)
 );
 
 CREATE INDEX memories_fts_idx ON continuum.memories USING gin (search_tsv);   -- [DERIVED]
@@ -315,6 +341,22 @@ WITH (
     m = 16,
     ef_construction = 64
 );
+
+-- [DERIVED] hardening, added OUTSIDE the verbatim block above so the reproduced
+-- v1.2 text stays unmodified.
+--
+-- Note what this implies about the source: v1.2's own DDL declares
+-- `memory_id REFERENCES continuum.memories(id)` and `workspace_id REFERENCES
+-- continuum.workspaces(id)` as INDEPENDENT constraints. Referential integrity
+-- does not require the referenced memory to belong to the referencing row's
+-- workspace, so the published DDL permits an embedding in workspace A to point
+-- at a memory in workspace B. That contradicts the v1.2 hard gate of zero
+-- cross-workspace access, and is a defect in the source rather than in this
+-- reconstruction. The composite constraint below closes it.
+ALTER TABLE continuum.memory_embeddings
+    ADD CONSTRAINT memory_embeddings_tenant_fk
+    FOREIGN KEY (workspace_id, memory_id)
+    REFERENCES continuum.memories(workspace_id, id) ON DELETE CASCADE;
 
 -- [V11] knowledge_edges shape, identical in v1.0 and v1.1
 CREATE TABLE continuum.memory_edges (
@@ -393,7 +435,11 @@ CREATE TABLE continuum.tool_versions (
     promotion_stage      continuum.promotion_stage NOT NULL DEFAULT 'proposed',  -- [V12]
     created_at           timestamptz NOT NULL DEFAULT now(),          -- [V11]
     UNIQUE (tool_id, version),                                        -- [DERIVED]
-    CHECK (risk_level < 3 OR approval_required IS TRUE)               -- [V12] risk 3-4 need approval
+    CHECK (risk_level < 3 OR approval_required IS TRUE),              -- [V12] risk 3-4 need approval
+    -- [DERIVED] v1.2 gate: "0 active tools lacking manifest/digest". A promoted
+    -- version without a digest resolves to a mutable image at execution time.
+    CHECK (promotion_stage <> 'promoted'
+           OR image_digest ~ '^sha256:[0-9a-f]{64}$')
 );
 
 CREATE TABLE continuum.tool_executions (
@@ -415,6 +461,33 @@ CREATE TABLE continuum.tool_executions (
     created_at         timestamptz NOT NULL DEFAULT now(),            -- [V11]
     UNIQUE (workspace_id, idempotency_key)   -- [DERIVED] enforces "0 duplicate effects"
 );
+
+-- [DERIVED] The CHECK on tool_versions records that approval is REQUIRED; it does
+-- not require an approval to have happened before execution. v1.2's hard gate is
+-- "risk-3/4 actions without approval = 0", which is a statement about
+-- executions, not about manifests. A cross-table trigger is the only way to
+-- express that in-schema.
+CREATE OR REPLACE FUNCTION continuum.tool_execution_requires_approval()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+    lvl smallint;
+BEGIN
+    SELECT risk_level INTO lvl
+    FROM continuum.tool_versions
+    WHERE id = NEW.tool_version_id;
+
+    IF lvl >= 3 AND (NEW.approved_by IS NULL OR NEW.approved_at IS NULL) THEN
+        RAISE EXCEPTION
+            'risk-% tool execution requires a recorded approval', lvl
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER tool_executions_require_approval
+    BEFORE INSERT OR UPDATE ON continuum.tool_executions
+    FOR EACH ROW EXECUTE FUNCTION continuum.tool_execution_requires_approval();
 
 -- ---------------------------------------------------------------------------
 -- 11. Evaluations
@@ -464,7 +537,8 @@ CREATE TABLE continuum.mutations (
     approved_at    timestamptz,                                       -- [V12]
     rolled_back_at timestamptz,                                       -- [V12]
     created_at     timestamptz NOT NULL DEFAULT now(),                -- [V11]
-    CHECK (stage <> 'promoted' OR approved_by IS NOT NULL)   -- [DERIVED] no autonomous promotion
+    CHECK (stage <> 'promoted' OR approved_by IS NOT NULL),  -- [DERIVED] no autonomous promotion
+    CHECK ((approved_by IS NULL) = (approved_at IS NULL))    -- [DERIVED] approval is atomic
 );
 
 CREATE TABLE continuum.mutation_evaluations (
@@ -544,25 +618,31 @@ CREATE INDEX cost_events_workspace_time_idx
 -- ---------------------------------------------------------------------------
 
 CREATE TABLE continuum.events (
-    sequence            bigserial PRIMARY KEY,                        -- [V11]
-    event_id            uuid NOT NULL UNIQUE,                         -- [V12]/[V11]
-    workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id),
-    run_id              uuid REFERENCES continuum.runs(id),           -- [V12]
-    event_type          text NOT NULL,                                -- [V12]
-    schema_version      integer NOT NULL,                             -- [V12]/[V11]
-    aggregate_type      text NOT NULL,                                -- [V12]
-    aggregate_id        uuid NOT NULL,                                -- [V12]
-    causation_event_id  uuid,                                         -- [V12]
-    correlation_id      uuid,                                         -- [V12]
-    actor_type          text NOT NULL,                                -- [V12]
-    actor_id            uuid,                                         -- [V12]
-    trace_id            char(32),                                     -- [V12]
-    payload             jsonb NOT NULL,                               -- [V12]/[V11]
-    payload_artifact_id uuid,                                         -- [V12] >256 KiB to S3
-    previous_hash       char(64),                                     -- [V12]
-    event_hash          char(64) NOT NULL,                            -- [V12]
-    occurred_at         timestamptz NOT NULL,                         -- [V12]
-    ingested_at         timestamptz NOT NULL DEFAULT now()            -- [V12]
+    -- PROVENANCE NOTE. v1.2 supplies this table's FIELD NAMES only; it states
+    -- no types, no nullability and no keys. Every column below is therefore
+    -- [V12 name] + [DERIVED shape], except where v1.1's run_events ancestor
+    -- supplies the shape directly, marked [V11 shape]. Tagging these
+    -- declarations wholesale as [V12] would present inferred typing as
+    -- recovered source, which is exactly what CONT-LOCAL-GOV-001 forbids.
+    sequence            bigserial PRIMARY KEY,                        -- [V11 shape]
+    event_id            uuid NOT NULL UNIQUE,                         -- [V12 name] [V11 shape]
+    workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id),  -- [V12 name] [DERIVED shape]
+    run_id              uuid REFERENCES continuum.runs(id),           -- [V12 name] [DERIVED shape]
+    event_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
+    schema_version      integer NOT NULL,                             -- [V12 name] [V11 shape]
+    aggregate_type      text NOT NULL,                                -- [V12 name] [DERIVED shape]
+    aggregate_id        uuid NOT NULL,                                -- [V12 name] [DERIVED shape]
+    causation_event_id  uuid,                                         -- [V12 name] [DERIVED shape]
+    correlation_id      uuid,                                         -- [V12 name] [DERIVED shape]
+    actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
+    actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
+    trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
+    payload             jsonb NOT NULL,                               -- [V12 name] [V11 shape]
+    payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
+    previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
+    event_hash          char(64) NOT NULL,                            -- [V12 name] [DERIVED shape]
+    occurred_at         timestamptz NOT NULL,                         -- [V12 name] [DERIVED shape]
+    ingested_at         timestamptz NOT NULL DEFAULT now()            -- [V12 name] [DERIVED shape]
 );
 
 CREATE INDEX events_run_idx ON continuum.events (run_id, sequence);   -- [V11]
@@ -583,6 +663,9 @@ CREATE TRIGGER events_append_only
 
 REVOKE UPDATE, DELETE, TRUNCATE ON continuum.events FROM continuum_app;
 GRANT INSERT, SELECT ON continuum.events TO continuum_app;
+-- [DERIVED] table INSERT alone does not permit evaluating the bigserial default;
+-- without sequence USAGE every application insert fails on permissions.
+GRANT USAGE ON SEQUENCE continuum.events_sequence_seq TO continuum_app;
 
 -- ---------------------------------------------------------------------------
 -- 16. Row Level Security                                               [V12]
@@ -592,7 +675,7 @@ DO $$
 DECLARE
     t text;
     tenant_tables text[] := ARRAY[
-        'workspace_members','runs','agents','agent_versions','model_metrics',
+        'workspace_members','runs','model_metrics',
         'evidence','claims','claim_evidence','memories','memory_embeddings',
         'memory_edges','failures','tools','tool_versions','tool_executions',
         'evaluations','evaluation_results','mutations','mutation_evaluations',
@@ -607,6 +690,30 @@ BEGIN
             'USING (workspace_id = continuum.current_workspace_id()) '
             'WITH CHECK (workspace_id = continuum.current_workspace_id())',
             t || '_tenant_isolation', t);
+    END LOOP;
+END
+$$;
+
+-- [DERIVED] agents and agent_versions allow workspace_id IS NULL to mean a
+-- built-in shared by every tenant. Under the uniform predicate
+-- `workspace_id = current_workspace_id()` a NULL never compares true, so every
+-- built-in agent would be invisible to every tenant. Reads therefore admit
+-- built-ins; writes stay tenant-only.
+DO $$
+DECLARE t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['agents','agent_versions'] LOOP
+        EXECUTE format('ALTER TABLE continuum.%I ENABLE ROW LEVEL SECURITY', t);
+        EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
+        EXECUTE format(
+            'CREATE POLICY %I ON continuum.%I FOR SELECT '
+            'USING (workspace_id = continuum.current_workspace_id() '
+            '       OR workspace_id IS NULL)', t || '_read', t);
+        EXECUTE format(
+            'CREATE POLICY %I ON continuum.%I FOR ALL '
+            'USING (workspace_id = continuum.current_workspace_id()) '
+            'WITH CHECK (workspace_id = continuum.current_workspace_id())',
+            t || '_write', t);
     END LOOP;
 END
 $$;

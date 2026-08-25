@@ -542,7 +542,7 @@ CREATE TABLE continuum.evaluation_results (
     case_id        text NOT NULL,                                    -- [DERIVED] suites are case corpora
     passed         boolean NOT NULL,                                 -- [DECISION]
     score          double precision,                                 -- [V12] continuum_eval_score is a required metric
-    metric_name    text,                                             -- [DECISION]
+    metric_name    text NOT NULL DEFAULT 'primary',                 -- [DECISION]
     detail         jsonb NOT NULL DEFAULT '{}'::jsonb,               -- [DECISION]
     created_at     timestamptz NOT NULL DEFAULT now(),               -- [V11]
     UNIQUE (evaluation_id, case_id, metric_name)                     -- [DERIVED]
@@ -811,13 +811,103 @@ are `[DECISION]` and are deliberately left unpinned here rather than invented.**
 
 ## 7. Temporal definitions
 
-### 7.1 Stated in v1.2 — reproduce exactly `[V12]`
+### 7.1 Stated in v1.2 — reproduced here `[V12]`
 
-Namespaces, task queues, priorities 1–5, the fairness key
-`w:<base32(sha256(workspace_id))[0:26]>`, plan weights, the workflow catalog and
-Continue-As-New conditions, all four retry policies, the Activity I/O contracts,
-and the error taxonomy are all present in the surviving report and are **not**
-reconstructed. Refer to the v1.2 report directly.
+The artifact this replaces was expected to carry the Temporal definitions, so
+they are reproduced rather than cross-referenced. The v1.2 report is not
+committed to this repository, and pointing at an uncommitted document would
+leave the replacement incomplete in exactly the way that created `SRC-001`.
+
+**Namespaces**
+
+| Environment | Namespace | Retention | HA |
+|---|---|---:|---|
+| Local | `continuum-dev` | 3 days | No |
+| Staging | `continuum-staging` | 7 days | Provider default |
+| Production | `continuum-prod` | 30 days | Yes |
+
+**Task queues**
+
+| Queue | Responsibility | Min workers | Scale policy |
+|---|---|---:|---|
+| `continuum.control` | Workflow coordination | 2 | HPA / Worker Controller |
+| `continuum.interactive` | Agent/model/context work | 2 | KEDA + Worker Controller |
+| `continuum.batch` | Evals, embeddings, memory, Watchers | 0 | KEDA scale-to-zero |
+| `continuum.actions` | External side effects | 2 | HPA; **no** scale-to-zero |
+| `continuum.sandbox` | Isolated computation | 0 | KEDA with hard maximum |
+| `continuum.gpu` | Optional GPU work | 0 | Disabled until configured |
+
+**Priority** — 1 is highest
+
+```text
+1 = action completion / approval / critical recovery
+2 = interactive
+3 = standard
+4 = evaluation / memory / watcher
+5 = bulk / mutation / non-urgent ingestion
+```
+
+**Fairness key** — `w:<base32(sha256(workspace_id))[0:26]>`, weighted by plan:
+internal/enterprise 2.0, team/builder 1.5, pro/personal 1.0, free 0.5.
+
+**Workflow catalog**
+
+| Workflow | Continue-As-New condition |
+|---|---|
+| `ReasoningWorkflow` | >8,000 history events or recurring execution >24h |
+| `EvaluationWorkflow` | >8,000 events |
+| `ActionWorkflow` | normally completes directly |
+| `IngestionWorkflow` | each 5,000-document epoch |
+| `ToolPromotionWorkflow` | each promotion epoch |
+| `MutationWorkflow` | each experiment epoch |
+
+**Retry policies**
+
+```python
+MODEL_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2), backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=20), maximum_attempts=3,
+    non_retryable_error_types=["InvalidInputError", "ProviderBadRequestError",
+                               "PolicyDeniedError", "BudgetExceededError"])
+
+IO_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=1), backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30), maximum_attempts=5)
+
+SIDE_EFFECT_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=2), backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30), maximum_attempts=3,
+    non_retryable_error_types=["PolicyDeniedError", "HumanApprovalRejected",
+                               "NonIdempotentActionError", "InvalidInputError"])
+
+SANDBOX_RETRY = RetryPolicy(
+    initial_interval=timedelta(seconds=5), backoff_coefficient=2.0,
+    maximum_interval=timedelta(seconds=30), maximum_attempts=2)
+```
+
+**Error taxonomy**
+
+| Error | Retry? | System behavior |
+|---|---|---|
+| `InvalidInputError` | No | terminal / config / user correction |
+| `PolicyDeniedError` | No | emit denial event |
+| `BudgetExceededError` | No | stop expansion, synthesize best available |
+| `ProviderBadRequestError` | No | configuration alert |
+| `ProviderRateLimitError` | Yes | bounded retry |
+| `ProviderUnavailableError` | Yes | bounded retry then provider failover |
+| `DatabaseConflictError` | Yes | repeat idempotent transaction |
+| `ArtifactIntegrityError` | Once | quarantine after repeat |
+| `ToolExecutionError` | Conditional | manifest policy |
+| `NonIdempotentActionError` | No | block side effect |
+| `HumanApprovalRejected` | No | complete workflow rejected |
+| `SandboxPolicyError` | No | security event + quarantine |
+| `StaleVersionError` | No | compatible-worker routing |
+| `CancellationRequested` | No | cooperative cancellation |
+
+Worker versioning ramps 5% → 25% → 50% → 100% with rollback at every stage. The
+Activity I/O contracts (`ActivityContext`, `CompileContextInput`,
+`ContextBundle`, `ExecuteAgentInput`, `AgentExecutionOutput`) are stated in v1.2
+and implemented in `services/orchestrator/temporal/`.
 
 ### 7.2 Activity timeouts — the one item explicitly lost
 
@@ -860,14 +950,56 @@ Constraints these must satisfy, all `[V12]`:
 
 ### Decisions requiring ADR approval before implementation
 
+**Ordered by consequence:**
+
 1. **Event hash canonicalisation** (§4.2) — highest priority. Changing this
-   after any event is written invalidates every existing chain.
-2. **Role and function names** — already approved under ADR-0001.
-3. **Enum vocabularies** not stated in source: `memory_type`, `run_status`,
-   `promotion_stage`, `plan_tier`, role names.
-4. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
-5. **Language dependency versions** (§6.2) — deliberately unpinned.
-6. **`users` / `models` exemption from RLS** (§5).
+   after any event is written invalidates every existing chain, so it must be
+   fixed before the event store takes its first write.
+2. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
+3. **Language dependency versions** (§6.2) — deliberately unpinned here.
+4. **`users` / `models` exemption from RLS** (§5).
+5. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
+   by every tenant under a dedicated read policy.
+6. **Role and function names** — already approved under ADR-0001.
+
+**Complete enumeration.** The list below is generated from the
+`[DECISION]` tags in `continuum_v1.2_core_schema.derived.sql`, so it cannot
+drift from the executable schema. Every entry needs approval before that
+declaration is relied upon.
+
+| # | Location | Declaration |
+|---:|---|---|
+| 1 | `schema-level` | `CREATE EXTENSION IF NOT EXISTS citext;` |
+| 2 | `schema-level` | `CREATE TYPE continuum.memory_type AS ENUM (` |
+| 3 | `schema-level` | `CREATE TYPE continuum.run_status AS ENUM (` |
+| 4 | `users` | `email        citext NOT NULL UNIQUE` |
+| 5 | `users` | `display_name text` |
+| 6 | `users` | `status       text NOT NULL DEFAULT 'active'` |
+| 7 | `users` | `updated_at   timestamptz NOT NULL DEFAULT now()` |
+| 8 | `workspaces` | `name       text NOT NULL` |
+| 9 | `workspaces` | `status     text NOT NULL DEFAULT 'active'` |
+| 10 | `workspaces` | `updated_at timestamptz NOT NULL DEFAULT now()` |
+| 11 | `workspace_members` | `role         text NOT NULL DEFAULT 'member'` |
+| 12 | `runs` | `created_by      uuid REFERENCES continuum.users(id)` |
+| 13 | `runs` | `status          continuum.run_status NOT NULL DEFAULT 'accepted'` |
+| 14 | `runs` | `started_at      timestamptz` |
+| 15 | `runs` | `completed_at    timestamptz` |
+| 16 | `agents` | `name         text NOT NULL` |
+| 17 | `agents` | `status       text NOT NULL DEFAULT 'active'` |
+| 18 | `agents` | `UNIQUE (workspace_id, name)` |
+| 19 | `agent_versions` | `config             jsonb NOT NULL DEFAULT '{}'::jsonb` |
+| 20 | `model_metrics` | `window_start      timestamptz NOT NULL` |
+| 21 | `model_metrics` | `window_end        timestamptz NOT NULL` |
+| 22 | `model_metrics` | `sample_count      integer NOT NULL CHECK (sample_count >= 0)` |
+| 23 | `claim_evidence` | `weight       double precision CHECK (weight BETWEEN 0 AND 1)` |
+| 24 | `tools` | `status       text NOT NULL DEFAULT 'active'` |
+| 25 | `tool_executions` | `status             text NOT NULL` |
+| 26 | `evaluations` | `status        text NOT NULL DEFAULT 'pending'` |
+| 27 | `evaluations` | `started_at    timestamptz` |
+| 28 | `evaluations` | `completed_at  timestamptz` |
+| 29 | `evaluation_results` | `passed        boolean NOT NULL` |
+| 30 | `evaluation_results` | `metric_name   text NOT NULL DEFAULT 'primary'` |
+| 31 | `evaluation_results` | `detail        jsonb NOT NULL DEFAULT '{}'::jsonb` |
 
 ### Known divergences from v1.2 already in-tree
 

@@ -181,4 +181,114 @@ BEGIN
 END
 $$;
 
+-- 9. Operational roles carry NOLOGIN NOBYPASSRLS even if pre-provisioned  [V12]
+DO $$
+DECLARE bad text[];
+BEGIN
+    SELECT array_agg(rolname::text) INTO bad
+    FROM pg_roles
+    WHERE rolname LIKE 'continuum\\_%' AND (rolbypassrls OR rolcanlogin);
+    IF bad IS NOT NULL THEN
+        RAISE EXCEPTION 'roles with BYPASSRLS or LOGIN: %', bad;
+    END IF;
+    RAISE NOTICE 'operational roles are NOLOGIN NOBYPASSRLS';
+END
+$$;
+
+-- 10. A child row cannot reference a parent owned by another workspace   [V12]
+INSERT INTO continuum.workspaces (id, name)
+VALUES ('00000000-0000-0000-0000-0000000000bb', 'other-tenant');
+
+INSERT INTO continuum.memories (id, workspace_id, memory_type, content, content_hash)
+VALUES ('00000000-0000-0000-0000-0000000000a1', '00000000-0000-0000-0000-0000000000bb',
+        'semantic', 'tenant B memory', repeat('0', 64));
+
+DO $$
+BEGIN
+    BEGIN
+        -- workspace A embedding pointing at workspace B's memory
+        INSERT INTO continuum.memory_embeddings (
+            memory_id, workspace_id, embedding_model, source_content_hash, embedding
+        ) VALUES (
+            '00000000-0000-0000-0000-0000000000a1',
+            '00000000-0000-0000-0000-0000000000aa',
+            'text-embedding-3-small', repeat('0', 64),
+            ('[' || array_to_string(array_fill(0, ARRAY[512]), ',') || ']')::vector
+        );
+        RAISE EXCEPTION 'cross-workspace association was accepted';
+    EXCEPTION WHEN foreign_key_violation THEN
+        RAISE NOTICE 'cross-workspace parent reference: rejected';
+    END;
+END
+$$;
+
+-- 11. A promoted tool version cannot exist without an immutable digest   [V12]
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.tool_versions (
+            id, tool_id, version, risk_level, side_effect,
+            idempotency_required, idempotency_strategy,
+            permissions, resources, approval_required,
+            input_schema, output_schema, manifest_hash, promotion_stage
+        ) VALUES (
+            '00000000-0000-0000-0000-0000000000c2',
+            '00000000-0000-0000-0000-0000000000b1',
+            '1.0.1', 1, 'none', true, 'caller_key',
+            '{}'::jsonb, '{}'::jsonb, false,
+            '{}'::jsonb, '{}'::jsonb, repeat('0', 64), 'promoted'
+        );
+        RAISE EXCEPTION 'promoted tool version accepted without a digest';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'promoted tool version requires a digest: enforced';
+    END;
+END
+$$;
+
+-- 12. A risk-3/4 execution cannot be recorded without an approval        [V12]
+INSERT INTO continuum.tool_versions (
+    id, tool_id, version, risk_level, side_effect,
+    idempotency_required, idempotency_strategy,
+    permissions, resources, approval_required,
+    input_schema, output_schema, manifest_hash
+) VALUES (
+    '00000000-0000-0000-0000-0000000000c3',
+    '00000000-0000-0000-0000-0000000000b1',
+    '2.0.0', 4, 'irreversible_external_write', true, 'caller_key',
+    '{}'::jsonb, '{}'::jsonb, true,
+    '{}'::jsonb, '{}'::jsonb, repeat('0', 64)
+);
+
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.tool_executions (
+            id, workspace_id, tool_version_id, idempotency_key, status
+        ) VALUES (
+            '00000000-0000-0000-0000-0000000000f1',
+            '00000000-0000-0000-0000-0000000000aa',
+            '00000000-0000-0000-0000-0000000000c3',
+            'verify-key-1', 'pending'
+        );
+        RAISE EXCEPTION 'risk-4 execution accepted without approval';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'risk-3/4 execution requires recorded approval: enforced';
+    END;
+END
+$$;
+
+-- 13. Built-in agents (workspace_id IS NULL) remain readable            [DERIVED]
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname='continuum' AND tablename='agents'
+          AND policyname='agents_read' AND qual LIKE '%IS NULL%'
+    ) THEN
+        RAISE EXCEPTION 'built-in agents would be invisible to every tenant';
+    END IF;
+    RAISE NOTICE 'built-in agents remain readable under the tenant policy';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;
