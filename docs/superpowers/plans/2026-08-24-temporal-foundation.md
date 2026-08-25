@@ -119,12 +119,12 @@
 **Interfaces:**
 - Produces: hard-gate evidence for `FND-TEMP-G1` through `FND-TEMP-G4`.
 
-- [ ] Run complete Temporal test suite from a fresh CI execution.
-- [ ] Run implementation-control verification.
-- [ ] Record RED and GREEN workflow URLs plus replay/failure/rollback evidence.
-- [ ] Change each hard gate to PASS only when its evidence exists.
-- [ ] Mark `FND-TEMP-001` complete only after all hard gates pass.
-- [ ] Keep PR draft until final review and verification are complete.
+- [x] Run complete Temporal test suite from a fresh CI execution.
+- [x] Run implementation-control verification.
+- [x] Record RED and GREEN workflow URLs plus replay/failure/rollback evidence.
+- [x] Change each hard gate to PASS only when its evidence exists.
+- [x] Mark `FND-TEMP-001` complete only after all hard gates pass.
+- [x] Keep PR draft until final review and verification are complete.
 
 ## Self-review
 

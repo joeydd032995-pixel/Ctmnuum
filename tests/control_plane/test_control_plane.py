@@ -344,11 +344,22 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("python -m scripts.control_plane_policy verify", workflow)
         self.assertIn("python -m scripts.control_plane_policy report", workflow)
 
-    def test_completed_control_plane_unlocks_temporal_foundation(self) -> None:
+    def test_temporal_package_advances_after_control_plane_completion(self) -> None:
         state = load_control_state(ROOT)
         self.assertEqual(state.work_packages["FND-CTRL-001"]["status"], "complete")
+        temporal = state.work_packages["FND-TEMP-001"]
+        self.assertIn("FND-CTRL-001", temporal["dependencies"])
         eligible = {item["id"] for item in strict_eligible_work_packages(state)}
-        self.assertIn("FND-TEMP-001", eligible)
+        if temporal["status"] in {"planned", "ready"}:
+            self.assertIn("FND-TEMP-001", eligible)
+        else:
+            self.assertEqual(temporal["status"], "complete")
+            self.assertNotIn("FND-TEMP-001", eligible)
+            hard_gates = [
+                gate for gate in temporal["acceptance_gates"] if gate["hard"]
+            ]
+            self.assertGreaterEqual(len(hard_gates), 1)
+            self.assertTrue(all(gate["status"] == "PASS" for gate in hard_gates))
 
 
 if __name__ == "__main__":
