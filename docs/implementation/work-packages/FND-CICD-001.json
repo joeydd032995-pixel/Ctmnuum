@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "FND-CICD-001",
+  "phase": "foundation",
+  "title": "CI/CD pipeline and release gates",
+  "status": "planned",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-REPO-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-CICD-G1",
+      "description": "The pipeline implements the v1.2 gate order through image build, including secret scanning and dependency, container and IaC scanning.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-CICD-G2",
+      "description": "Images are immutable digests with an SBOM, and Temporal workflow replay runs as a merge gate.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-CICD-G3",
+      "description": "Zero unwaived Critical or High findings on the release candidate.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-CICD-001 commits; no phase may advance while this package is incomplete."
+}

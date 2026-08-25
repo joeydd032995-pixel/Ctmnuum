@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "FND-DEPLOY-001",
+  "phase": "foundation",
+  "title": "Helm, KEDA and autoscaling",
+  "status": "planned",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-INFRA-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-DEPLOY-G1",
+      "description": "Helm charts lint and render cleanly and pass Kubernetes policy validation.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DEPLOY-G2",
+      "description": "KEDA scales Temporal Activity worker pools per queue, with scale-to-zero only on queues where v1.2 permits it.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DEPLOY-G3",
+      "description": "Rollback is demonstrated in staging for both API and worker deployments.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-DEPLOY-001 commits; no phase may advance while this package is incomplete."
+}

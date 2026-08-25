@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "FND-DB-001",
+  "phase": "foundation",
+  "title": "PostgreSQL platform bootstrap, roles and tenant isolation",
+  "status": "planned",
+  "risk": "high",
+  "approval_required": true,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-REPO-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-DB-G1",
+      "description": "PostgreSQL 18 baseline with pgvector is provisioned and asserted by an integration test.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DB-G2",
+      "description": "Distinct application, migration and maintenance roles exist; the application role is NOBYPASSRLS.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DB-G3",
+      "description": "Transaction-scoped SET LOCAL app.workspace_id drives RLS, fails closed when unset, and does not leak past COMMIT.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DB-G4",
+      "description": "Adversarial cross-workspace access testing records zero leaks across at least 10,000 attempts.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-DB-001 commits; no phase may advance while this package is incomplete."
+}

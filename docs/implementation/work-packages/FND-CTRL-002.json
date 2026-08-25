@@ -1,0 +1,57 @@
+{
+  "schema_version": 1,
+  "id": "FND-CTRL-002",
+  "phase": "foundation",
+  "title": "Source-gap reference integrity and complete Foundation work-package registry",
+  "status": "complete",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003",
+    "CONT-LOCAL-GOV-001"
+  ],
+  "dependencies": [
+    "FND-CTRL-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-CTRL2-G1",
+      "description": "A source gap whose blocks array names an unregistered work package fails verification, so a governance control cannot be silently disarmed by a typo, a deleted package, or a rename.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "scripts/control_plane_policy.py"},
+        {"path": "tests/control_plane/test_control_plane.py"},
+        {"path": "docs/implementation/evidence/FND-CTRL-002.md"}
+      ]
+    },
+    {
+      "id": "FND-CTRL2-G2",
+      "description": "Every Foundation work package named by the v1.2 execution plan is registered, so the control-plane report distinguishes work that is finished from work that was never recorded.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "docs/implementation/work-packages/FND-REPO-001.json"},
+        {"path": "docs/implementation/work-packages/FND-DB-001.json"},
+        {"path": "docs/implementation/work-packages/FND-DB-DOMAIN.json"},
+        {"path": "docs/implementation/work-packages/FND-INFRA-001.json"},
+        {"path": "docs/implementation/work-packages/FND-DR-001.json"},
+        {"path": "docs/implementation/evidence/FND-CTRL-002.md"}
+      ]
+    },
+    {
+      "id": "FND-CTRL2-G3",
+      "description": "SRC-001 now blocks a registered work package (FND-DB-DOMAIN), and that package is excluded from the eligible-work listing while the gap remains open.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "docs/implementation/work-packages/FND-DB-DOMAIN.json"},
+        {"path": "docs/implementation/source-gaps.json"},
+        {"path": "tests/control_plane/test_control_plane.py"}
+      ]
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the control-plane commits. Reverting restores a state in which SRC-001 blocks nothing and the Foundation registry is incomplete, so a revert should be paired with an alternative correction."
+}

@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "FND-OTEL-001",
+  "phase": "foundation",
+  "title": "OpenTelemetry and dashboard foundation",
+  "status": "planned",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-REPO-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-OTEL-G1",
+      "description": "The required trace tree is emitted and critical-path trace coverage is at least 95%.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-OTEL-G2",
+      "description": "Prohibited attributes (raw prompts, credentials, personal data) never appear in traces, logs or metrics, verified by a redaction test.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-OTEL-G3",
+      "description": "Required metrics are exported, and run IDs and user IDs are absent from metric dimensions.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-OTEL-001 commits; no phase may advance while this package is incomplete."
+}

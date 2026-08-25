@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "id": "FND-INFRA-001",
+  "phase": "foundation",
+  "title": "EKS, VPC, Terraform and Pod Identity",
+  "status": "planned",
+  "risk": "high",
+  "approval_required": true,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-REPO-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-INFRA-G1",
+      "description": "Network, KMS, EKS and IAM modules apply from Terraform with pinned provider versions and no auto-approved provider upgrades.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-INFRA-G2",
+      "description": "Workload AWS credentials come from EKS Pod Identity; no static access keys exist in the cluster.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-INFRA-G3",
+      "description": "Default-deny NetworkPolicy is in force and the VPC CNI enforces policy in strict mode.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-INFRA-G4",
+      "description": "Production renders contain zero Continuum StatefulSets.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-INFRA-001 commits; no phase may advance while this package is incomplete."
+}
