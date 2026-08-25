@@ -3,6 +3,8 @@ from __future__ import annotations
 from services.orchestrator.temporal.contracts import WorkflowRequest
 from services.orchestrator.temporal.policies import CONTINUE_AS_NEW
 
+FOUNDATION_ACTIVITY_CONTEXT_V1_PATCH = "foundation-activity-context-v1"
+
 
 def should_continue_as_new(*, event_count: int, age_seconds: int) -> bool:
     return (

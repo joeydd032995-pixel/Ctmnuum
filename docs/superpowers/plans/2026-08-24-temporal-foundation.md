@@ -52,11 +52,11 @@
 - Consumes: Foundation dataclasses and policy constants.
 - Produces: SDK `@workflow.defn` workflow and `@activity.defn` Activities, test-environment execution path.
 
-- [ ] Write failing SDK runtime tests.
-- [ ] Verify RED.
-- [ ] Add pinned Temporal SDK dependency and runtime implementation.
-- [ ] Execute workflow in Temporal test environment.
-- [ ] Verify GREEN.
+- [x] Write failing SDK runtime tests.
+- [x] Verify RED.
+- [x] Add pinned Temporal SDK dependency and runtime implementation.
+- [x] Execute workflow in Temporal test environment.
+- [x] Verify GREEN.
 
 ### Task 3: Replay and versioning safety
 
@@ -68,12 +68,12 @@
 **Interfaces:**
 - Produces: version-safe workflow behavior and replay verification entrypoint.
 
-- [ ] Write replay/versioning test that fails without explicit compatibility mechanism.
-- [ ] Verify RED.
-- [ ] Implement the smallest stable SDK-supported versioning/patching mechanism needed by the Foundation workflow.
-- [ ] Generate/capture a deterministic test history through the SDK test environment.
-- [ ] Replay history against current workflow implementation.
-- [ ] Verify GREEN.
+- [x] Write replay/versioning test that fails without explicit compatibility mechanism.
+- [x] Verify RED.
+- [x] Implement the smallest stable SDK-supported versioning/patching mechanism needed by the Foundation workflow.
+- [x] Generate/capture a deterministic test history through the SDK test environment.
+- [x] Replay history against current workflow implementation.
+- [x] Verify GREEN.
 
 ### Task 4: Retry, timeout, heartbeat, cancellation, idempotency, Continue-As-New
 
@@ -86,12 +86,12 @@
 **Interfaces:**
 - Produces: encoded policy-to-SDK mapping and observable retry/failure behavior.
 
-- [ ] Write failing tests for retry classification and maximum attempts.
-- [ ] Write failing tests for long-running heartbeat/cancellation settings.
-- [ ] Write failing test proving duplicate Activity execution uses stable idempotency key.
-- [ ] Write failing test for Continue-As-New threshold decision.
-- [ ] Implement minimal mappings and behavior.
-- [ ] Verify all failure-semantics tests GREEN.
+- [x] Write failing tests for retry classification and maximum attempts.
+- [x] Write failing tests for long-running heartbeat/cancellation settings.
+- [x] Write failing test proving duplicate Activity execution uses stable idempotency key.
+- [x] Write failing test for Continue-As-New threshold decision.
+- [x] Implement minimal mappings and behavior.
+- [x] Verify all failure-semantics tests GREEN.
 
 ### Task 5: Worker deployment/versioning rollback
 
@@ -103,12 +103,12 @@
 **Interfaces:**
 - Produces: stable build/deployment metadata and documented rollback procedure.
 
-- [ ] Write failing rollback/versioning tests.
-- [ ] Verify RED.
-- [ ] Implement stable worker-version metadata and previous-build rollback selection.
-- [ ] Verify no runtime flag enables preview-only features.
-- [ ] Document rollback runbook.
-- [ ] Verify GREEN.
+- [x] Write failing rollback/versioning tests.
+- [x] Verify RED.
+- [x] Implement stable worker-version metadata and previous-build rollback selection.
+- [x] Verify no runtime flag enables preview-only features.
+- [x] Document rollback runbook.
+- [x] Verify GREEN.
 
 ### Task 6: Evidence and control-plane completion
 

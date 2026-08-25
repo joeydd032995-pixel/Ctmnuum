@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+PERMANENT_ACTIVITY_ERROR_TYPES: tuple[str, ...] = (
+    "continuum.validation",
+    "continuum.authorization",
+    "continuum.policy_denied",
+    "continuum.permanent",
+)
+
 
 @dataclass(frozen=True, slots=True)
 class ActivityPolicy:
@@ -10,6 +17,7 @@ class ActivityPolicy:
     schedule_to_close_timeout_seconds: int
     heartbeat_timeout_seconds: int | None = None
     cancellable: bool = True
+    non_retryable_error_types: tuple[str, ...] = PERMANENT_ACTIVITY_ERROR_TYPES
 
 
 @dataclass(frozen=True, slots=True)
