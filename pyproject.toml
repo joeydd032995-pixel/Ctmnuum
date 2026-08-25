@@ -1,0 +1,12 @@
+[project]
+name = "ctmnuum"
+version = "0.0.0"
+description = "Continuum persistent autonomous reasoning environment"
+requires-python = ">=3.13,<3.15"
+dependencies = [
+  "temporalio==1.31.0",
+]
+
+[tool.continuum]
+python = "3.13"
+temporalio = "1.31.0"
