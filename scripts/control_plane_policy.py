@@ -49,6 +49,28 @@ def policy_errors(state: ControlState) -> list[str]:
                 f"expected {expected_predecessor!r}, got {phase.get('predecessor')!r}"
             )
 
+    # A source gap that names a work package which does not exist blocks
+    # nothing: the blocker loop below only visits registered packages, so the
+    # reference is silently inert and `verify` still passes. Treat a dangling
+    # `blocks` entry as a verification error so a governance control cannot be
+    # quietly disarmed by a typo or a deleted/renamed package.
+    for gap_id, gap in sorted(state.source_gaps.items()):
+        blocks = gap.get("blocks")
+        if not isinstance(blocks, list):
+            errors.append(f"source gap {gap_id}: blocks must be a list")
+            continue
+        for package_id in blocks:
+            if not isinstance(package_id, str) or not package_id.strip():
+                errors.append(
+                    f"source gap {gap_id}: blocks entries must be non-empty strings"
+                )
+            elif package_id not in state.work_packages:
+                errors.append(
+                    f"source gap {gap_id}: blocks unknown work package "
+                    f"'{package_id}'; a gap that blocks a package which does not "
+                    "exist enforces nothing"
+                )
+
     open_gap_blocks = _open_gap_blocks(state)
 
     for package_id, package in state.work_packages.items():

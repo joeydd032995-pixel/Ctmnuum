@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "id": "FND-ART-001",
+  "phase": "foundation",
+  "title": "S3 and KMS artifact service",
+  "status": "planned",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-INFRA-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-ART-G1",
+      "description": "Artifact buckets enforce Block Public Access, versioning and SSE-KMS with a customer-managed key.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-ART-G2",
+      "description": "Upload verifies SHA-256 incrementally and records byte length and version; checksum mismatches are zero across at least 10,000 objects.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-ART-G3",
+      "description": "Presigned URLs expire within 15 minutes and are never persisted as durable references.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-ART-001 commits; no phase may advance while this package is incomplete."
+}

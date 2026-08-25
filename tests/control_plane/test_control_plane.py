@@ -269,6 +269,90 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertTrue(any("source gap" in error.lower() for error in errors), errors)
             self.assertEqual(strict_eligible_work_packages(state), [])
 
+    def test_source_gap_blocking_unknown_package_is_a_verification_error(self) -> None:
+        # A gap naming a package that does not exist blocks nothing: the blocker
+        # loop only visits registered packages, so the control is silently
+        # inert. This must fail verification rather than pass quietly.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            _write_json(
+                root / "docs/implementation/source-gaps.json",
+                {
+                    "schema_version": 1,
+                    "source_gaps": [
+                        {
+                            "id": "SRC-TEST",
+                            "description": "fixture gap",
+                            "status": "open",
+                            "severity": "high",
+                            "blocks": ["FND-DOES-NOT-EXIST"],
+                            "tracking": "https://example.invalid/gap",
+                        }
+                    ],
+                },
+            )
+            state = load_control_state(root)
+            errors = policy_errors(state)
+            self.assertTrue(
+                any("unknown work package" in error for error in errors), errors
+            )
+            self.assertTrue(
+                any("FND-DOES-NOT-EXIST" in error for error in errors), errors
+            )
+
+    def test_resolved_source_gap_blocking_unknown_package_is_also_rejected(self) -> None:
+        # Registry integrity does not depend on gap status; a dangling reference
+        # left behind by a deleted or renamed package is still a dead control.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            _write_json(
+                root / "docs/implementation/source-gaps.json",
+                {
+                    "schema_version": 1,
+                    "source_gaps": [
+                        {
+                            "id": "SRC-TEST",
+                            "description": "fixture gap",
+                            "status": "resolved",
+                            "severity": "low",
+                            "blocks": ["FND-DELETED"],
+                            "tracking": "https://example.invalid/gap",
+                        }
+                    ],
+                },
+            )
+            errors = policy_errors(load_control_state(root))
+            self.assertTrue(
+                any("unknown work package" in error for error in errors), errors
+            )
+
+    def test_source_gap_blocks_entries_must_be_non_empty_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _seed_minimal_repo(root)
+            _write_json(
+                root / "docs/implementation/source-gaps.json",
+                {
+                    "schema_version": 1,
+                    "source_gaps": [
+                        {
+                            "id": "SRC-TEST",
+                            "description": "fixture gap",
+                            "status": "open",
+                            "severity": "high",
+                            "blocks": ["   "],
+                            "tracking": "https://example.invalid/gap",
+                        }
+                    ],
+                },
+            )
+            errors = policy_errors(load_control_state(root))
+            self.assertTrue(
+                any("non-empty strings" in error for error in errors), errors
+            )
+
     def test_phase_chain_must_match_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

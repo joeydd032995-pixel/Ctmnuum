@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "id": "FND-DB-DOMAIN",
+  "phase": "foundation",
+  "title": "Core domain schema, event store and Alembic migrations",
+  "status": "blocked",
+  "risk": "high",
+  "approval_required": true,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003",
+    "CONT-LOCAL-GOV-001"
+  ],
+  "dependencies": [
+    "FND-DB-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-DBD-G1",
+      "description": "Core domain tables are created from recovered or ADR-approved v1.2 DDL, with RLS policies on every tenant-scoped table.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DBD-G2",
+      "description": "The event store is append-only for application roles and the previous_hash/event_hash chain detects tampering.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DBD-G3",
+      "description": "Fresh-database and previous-release migrations both succeed under the expand/migrate/contract sequence.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [
+    "SRC-001"
+  ],
+  "rollback": "Revert the migration commits and restore the prior schema revision; no domain DDL may be presented as recovered v1.2 source text while SRC-001 is open."
+}

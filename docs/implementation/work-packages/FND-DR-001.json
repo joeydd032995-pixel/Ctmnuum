@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "FND-DR-001",
+  "phase": "foundation",
+  "title": "Restore drill and Foundation acceptance exercise",
+  "status": "planned",
+  "risk": "high",
+  "approval_required": true,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-DB-001",
+    "FND-ART-001",
+    "FND-INFRA-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-DR-G1",
+      "description": "A restore drill rebuilds the environment from backups and measures real RPO and RTO against the v1.2 engineering targets.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DR-G2",
+      "description": "Event hash chains verify after restore and artifact integrity is intact.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    },
+    {
+      "id": "FND-DR-G3",
+      "description": "The Foundation load and durability gate passes: p95 run-accept at or under 500 ms, under 0.5% gateway 5xx, zero lost workflows after worker termination, zero Temporal replay failures.",
+      "hard": true,
+      "status": "PENDING",
+      "evidence": []
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-DR-001 commits; no phase may advance while this package is incomplete."
+}
