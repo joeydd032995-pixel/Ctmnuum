@@ -75,6 +75,26 @@ Verified log results:
 - 14 control-plane tests — PASS;
 - authoritative control-plane governance verification — PASS.
 
+### Review-hardening GREEN
+
+Independent review identified two runtime contract gaps: invalid input raised a
+plain `ValueError`, leaving the Workflow Task retrying, and Worker Deployment
+metadata omitted the actual `continuum.foundation` queue. The hardening pass
+added integration regressions, converts expected validation failures to a
+non-retryable `continuum.validation` `ApplicationError`, centralizes the queue,
+and executes the Foundation Workflow with the generated versioned-worker
+configuration.
+
+Fresh pull-request runs for hardening commit
+`2d14c8f087a687ffff4f5bd5777717b5612cb326`:
+
+- Temporal Foundation: `https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413292`
+- Implementation Control Plane: `https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413321`
+
+These runs verified the package while `FND-TEMP-001` was already `complete`
+with all four hard gates set to PASS. The Temporal suite contained 21 tests and
+the control-plane suite contained 14 tests.
+
 ## Gate evidence
 
 ### FND-TEMP-G1 — deterministic Workflow/Activity boundary

@@ -23,7 +23,7 @@
       "evidence": [
         {"path": "services/orchestrator/temporal/runtime.py"},
         {"path": "tests/temporal/test_temporal_execution.py"},
-        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32843622281"}
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413292"}
       ]
     },
     {
@@ -34,7 +34,7 @@
       "evidence": [
         {"path": "tests/temporal/test_temporal_replay.py"},
         {"path": "tests/temporal/history/README.md"},
-        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32843622281"}
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413292"}
       ]
     },
     {
@@ -45,7 +45,7 @@
       "evidence": [
         {"path": "services/orchestrator/temporal/policies.py"},
         {"path": "tests/temporal/test_temporal_failure_semantics.py"},
-        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32843622281"}
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413292"}
       ]
     },
     {
@@ -57,7 +57,7 @@
         {"path": "services/orchestrator/temporal/worker.py"},
         {"path": "tests/temporal/test_worker_versioning.py"},
         {"path": "docs/runbooks/temporal-worker-rollback.md"},
-        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32843622281"}
+        {"external_ref": "https://github.com/joeydd032995-pixel/Ctmnuum/actions/runs/32844413292"}
       ]
     }
   ],
