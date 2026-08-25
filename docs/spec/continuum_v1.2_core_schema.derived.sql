@@ -142,7 +142,7 @@ CREATE TABLE continuum.runs (
     trace_id        char(32) CHECK (trace_id ~ '^[0-9a-f]{32}$'),     -- [V12] pattern
     started_at      timestamptz,                                      -- [DECISION]
     completed_at    timestamptz,                                      -- [DECISION]
-    created_at      timestamptz NOT NULL DEFAULT now()                -- [V11],
+    created_at      timestamptz NOT NULL DEFAULT now(),                -- [V11]
     -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
     UNIQUE (workspace_id, id)
 );
@@ -231,7 +231,7 @@ CREATE TABLE continuum.evidence (
     payload             jsonb NOT NULL DEFAULT '{}'::jsonb,           -- [V11]
     payload_artifact_id uuid,                                         -- [V12] >256 KiB to S3
     trace_id            char(32),                                     -- [V11]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11],
+    created_at          timestamptz NOT NULL DEFAULT now(),            -- [V11]
     -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
     UNIQUE (workspace_id, id)
 );
@@ -249,7 +249,7 @@ CREATE TABLE continuum.claims (
     created_by_agent_version uuid REFERENCES continuum.agent_versions(id),  -- [V11]
     superseded_by            uuid,                                    -- [DERIVED]
     trace_id                 char(32),                                -- [V11]
-    created_at               timestamptz NOT NULL DEFAULT now()       -- [V11],
+    created_at               timestamptz NOT NULL DEFAULT now(),       -- [V11]
     -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
     UNIQUE (workspace_id, id),
     -- [DERIVED] a claim may only be superseded within its own tenant
@@ -301,7 +301,7 @@ CREATE TABLE continuum.memories (
     source_run_id       uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [DERIVED]
     search_tsv          tsvector,                                     -- [V12] FTS named
     trace_id            char(32),                                     -- [V11]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V11],
+    created_at          timestamptz NOT NULL DEFAULT now(),            -- [V11]
     -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
     UNIQUE (workspace_id, id),
     -- [DERIVED] a memory may only be superseded within its own tenant

@@ -53,6 +53,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # Fails in seconds on a grammar error, before the database is touched.
+      - name: Validate SQL against the PostgreSQL grammar
+        run: |
+          python -m pip install --disable-pip-version-check pglast==8.4
+          python scripts/check_sql_syntax.py
+
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
