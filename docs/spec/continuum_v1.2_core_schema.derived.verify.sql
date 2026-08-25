@@ -245,6 +245,27 @@ BEGIN
 END
 $$;
 
+-- 11b. ...but a promoted version WITH a valid digest is accepted     [DERIVED]
+INSERT INTO continuum.tool_versions (
+    id, tool_id, version, risk_level, side_effect,
+    idempotency_required, idempotency_strategy,
+    permissions, resources, approval_required,
+    input_schema, output_schema, manifest_hash, promotion_stage, image_digest
+) VALUES (
+    '00000000-0000-0000-0000-0000000000c4',
+    '00000000-0000-0000-0000-0000000000b1',
+    '1.0.2', 1, 'none', true, 'caller_key',
+    '{}'::jsonb, '{}'::jsonb, false,
+    '{}'::jsonb, '{}'::jsonb, repeat('0', 64), 'promoted',
+    'sha256:' || repeat('a', 64)
+);
+
+DO $$
+BEGIN
+    RAISE NOTICE 'promoted tool version with a valid digest: accepted';
+END
+$$;
+
 -- 12. A risk-3/4 execution cannot be recorded without an approval        [V12]
 INSERT INTO continuum.tool_versions (
     id, tool_id, version, risk_level, side_effect,

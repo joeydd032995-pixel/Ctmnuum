@@ -438,8 +438,13 @@ CREATE TABLE continuum.tool_versions (
     CHECK (risk_level < 3 OR approval_required IS TRUE),              -- [V12] risk 3-4 need approval
     -- [DERIVED] v1.2 gate: "0 active tools lacking manifest/digest". A promoted
     -- version without a digest resolves to a mutable image at execution time.
+    --
+    -- The IS NOT NULL is load-bearing. `NULL ~ pattern` evaluates to NULL, not
+    -- FALSE, and a CHECK constraint only rejects FALSE -- so the regexp alone
+    -- would silently admit exactly the row it is meant to block.
     CHECK (promotion_stage <> 'promoted'
-           OR image_digest ~ '^sha256:[0-9a-f]{64}$')
+           OR (image_digest IS NOT NULL
+               AND image_digest ~ '^sha256:[0-9a-f]{64}$'))
 );
 
 CREATE TABLE continuum.tool_executions (
