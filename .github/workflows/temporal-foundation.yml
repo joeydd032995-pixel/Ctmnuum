@@ -1,0 +1,31 @@
+name: Temporal Foundation
+
+on:
+  push:
+    branches:
+      - feat/foundation-temporal
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  temporal-contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install pinned Temporal SDK
+        run: python -m pip install --disable-pip-version-check temporalio==1.31.0
+
+      - name: Run Temporal Foundation contract tests
+        run: python -m unittest discover -s tests/temporal -p 'test_*.py' -v
