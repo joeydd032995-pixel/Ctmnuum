@@ -74,8 +74,8 @@ class TemporalFoundationContractTests(unittest.TestCase):
         self.assertIn("model_call", ACTIVITY_POLICIES)
         self.assertGreaterEqual(ACTIVITY_POLICIES["model_call"].maximum_attempts, 1)
         self.assertIsNotNone(ACTIVITY_POLICIES["long_running"].heartbeat_timeout_seconds)
-        self.assertGreater(CONTINUE_AS_NEW.max_events, 0)
-        self.assertGreater(CONTINUE_AS_NEW.max_age_seconds, 0)
+        self.assertEqual(CONTINUE_AS_NEW.max_events, 8_000)
+        self.assertEqual(CONTINUE_AS_NEW.max_age_seconds, 24 * 3600)
         self.assertFalse(WORKER_VERSIONING.preview_only_required)
         self.assertTrue(WORKER_VERSIONING.rollback_supported)
 
@@ -99,8 +99,8 @@ class TemporalFoundationContractTests(unittest.TestCase):
         from services.orchestrator.temporal.workflows import should_continue_as_new
 
         self.assertFalse(should_continue_as_new(event_count=1, age_seconds=1))
-        self.assertTrue(should_continue_as_new(event_count=100_000, age_seconds=1))
-        self.assertTrue(should_continue_as_new(event_count=1, age_seconds=7 * 24 * 3600))
+        self.assertTrue(should_continue_as_new(event_count=8_001, age_seconds=1))
+        self.assertTrue(should_continue_as_new(event_count=1, age_seconds=24 * 3600 + 1))
 
 
 if __name__ == "__main__":

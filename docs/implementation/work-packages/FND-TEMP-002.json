@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "id": "FND-TEMP-002",
+  "phase": "foundation",
+  "title": "Continue-As-New threshold correction and non-tautological policy evidence",
+  "status": "complete",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-TEMP-001",
+    "CONT-V12-GOV-003"
+  ],
+  "dependencies": [
+    "FND-TEMP-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-TEMP2-G1",
+      "description": "Continue-As-New thresholds match the v1.2 Temporal execution contract (>8,000 history events, >24h recurring execution) and are asserted against literal values rather than the constants under test.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "services/orchestrator/temporal/policies.py"},
+        {"path": "tests/temporal/test_temporal_failure_semantics.py"},
+        {"path": "tests/temporal/test_temporal_foundation.py"}
+      ]
+    },
+    {
+      "id": "FND-TEMP2-G2",
+      "description": "A Continue-As-New threshold at or above Temporal's history termination limit is rejected at construction, so an unreachable policy cannot be configured.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "services/orchestrator/temporal/policies.py"},
+        {"path": "tests/temporal/test_temporal_failure_semantics.py"}
+      ]
+    },
+    {
+      "id": "FND-TEMP2-G3",
+      "description": "The insufficient evidence originally recorded for FND-TEMP-G3 is documented, and both regressions are demonstrated to fail against the previous values.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        {"path": "docs/implementation/evidence/FND-TEMP-002.md"},
+        {"path": "docs/implementation/evidence/FND-TEMP-001.md"}
+      ]
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the correction commit. The thresholds are read at import time and no persisted state encodes them, so there is no data or schema compatibility implication; reverting restores the previous unreachable threshold and is therefore not a safe resting state."
+}

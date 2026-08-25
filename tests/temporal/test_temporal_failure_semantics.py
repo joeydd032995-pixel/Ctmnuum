@@ -7,7 +7,12 @@ from temporalio import workflow
 
 from services.orchestrator.temporal import activities, runtime
 from services.orchestrator.temporal.contracts import WorkflowRequest
-from services.orchestrator.temporal.policies import ACTIVITY_POLICIES, CONTINUE_AS_NEW
+from services.orchestrator.temporal.policies import (
+    ACTIVITY_POLICIES,
+    CONTINUE_AS_NEW,
+    TEMPORAL_HISTORY_TERMINATION_EVENTS,
+    ContinueAsNewPolicy,
+)
 from services.orchestrator.temporal.workflows import should_continue_as_new
 
 
@@ -70,25 +75,36 @@ class TemporalFailureSemanticsTests(unittest.TestCase):
         )
         self.assertNotEqual(first.idempotency_key, legacy.idempotency_key)
 
-    def test_continue_as_new_thresholds_are_exact(self) -> None:
-        self.assertFalse(
-            should_continue_as_new(
-                event_count=CONTINUE_AS_NEW.max_events - 1,
-                age_seconds=CONTINUE_AS_NEW.max_age_seconds - 1,
-            )
+    def test_continue_as_new_thresholds_match_the_v12_contract(self) -> None:
+        # Literal values, not references to the constants under test. Asserting
+        # a boundary in terms of the constant that defines it passes for any
+        # value and cannot detect drift from the v1.2 contract.
+        self.assertEqual(CONTINUE_AS_NEW.max_events, 8_000)
+        self.assertEqual(CONTINUE_AS_NEW.max_age_seconds, 24 * 3600)
+
+    def test_continue_as_new_threshold_stays_below_temporal_termination(self) -> None:
+        # Temporal terminates the Workflow Execution above this many events, so a
+        # threshold at or above it can never fire. Guards against reintroducing
+        # an unreachable Continue-As-New branch.
+        self.assertLess(
+            CONTINUE_AS_NEW.max_events,
+            TEMPORAL_HISTORY_TERMINATION_EVENTS,
         )
-        self.assertTrue(
-            should_continue_as_new(
-                event_count=CONTINUE_AS_NEW.max_events,
-                age_seconds=0,
+        with self.assertRaises(ValueError):
+            ContinueAsNewPolicy(
+                max_events=TEMPORAL_HISTORY_TERMINATION_EVENTS,
+                max_age_seconds=24 * 3600,
             )
-        )
-        self.assertTrue(
-            should_continue_as_new(
-                event_count=0,
-                age_seconds=CONTINUE_AS_NEW.max_age_seconds,
-            )
-        )
+        with self.assertRaises(ValueError):
+            ContinueAsNewPolicy(max_events=100_000, max_age_seconds=24 * 3600)
+
+    def test_continue_as_new_boundary_behavior(self) -> None:
+        # The contract is strictly greater-than, so the threshold value itself
+        # must not trigger; only the first value beyond it does.
+        self.assertFalse(should_continue_as_new(event_count=7_999, age_seconds=86_399))
+        self.assertFalse(should_continue_as_new(event_count=8_000, age_seconds=86_400))
+        self.assertTrue(should_continue_as_new(event_count=8_001, age_seconds=0))
+        self.assertTrue(should_continue_as_new(event_count=0, age_seconds=86_401))
 
     def test_long_running_policy_is_explicitly_cancellable(self) -> None:
         self.assertTrue(ACTIVITY_POLICIES["long_running"].cancellable)
