@@ -72,3 +72,8 @@ jobs:
 
       - name: Verify derived schema invariants
         run: psql -v ON_ERROR_STOP=1 -f docs/spec/continuum_v1.2_core_schema.derived.verify.sql
+
+      # The chain-head race cannot be exercised from a single psql script: it
+      # needs two writers inserting into one workspace at the same time.
+      - name: Verify the hash chain under concurrent writers
+        run: bash scripts/verify_event_chain_concurrency.sh

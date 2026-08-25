@@ -106,8 +106,20 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
 16. The event hash chain is computed server-side and follows `sequence` order,
     including for several events written inside one transaction.
 17. A forged `previous_hash` is rejected rather than silently overwritten.
+18. `TRUNCATE` on the event store is rejected (it bypasses row-level triggers,
+    so assertion 6 alone does not establish append-only).
+19. The stored `event_hash` is reproducible by an independent verifier running
+    under a non-UTC session `TimeZone`.
+20. `payload_artifact_id` is covered by the hash.
+21. The ordering value has no column default, and the chain-head lookup is
+    indexed.
 
-Assertions 6–17 are the point of the exercise. v1.2 states these as hard gates
+Plus a concurrent-writer test that cannot be expressed in a single psql script:
+`scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
+workspace as separate autocommit statements and asserts the chain is intact in
+`sequence` order.
+
+Assertions 6–21 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -125,7 +137,8 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–17
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–21
+- `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
 - Artifact §8 lists every `[DECISION]` requiring ADR approval
@@ -174,6 +187,51 @@ that promotion required "a human approver". Neither was true as written: the
 genuinely enforced by a trigger. Finding 2 cannot be closed in-schema without an
 authenticated approval path, so the gate text was corrected to say what the
 constraint actually provides rather than what it was claimed to provide.
+
+## Third round: six findings on the server-side hash chain
+
+Automated review of the adopted hash trigger returned six findings, two of them
+P1. All six were verified against the source and all six were correct. They are
+worth recording because five of the six are defects that only appear under
+conditions a single-session test does not create.
+
+| # | Finding | Verified how | Resolution |
+|---:|---|---|---|
+| 1 | `sequence` is allocated by the `bigserial` default, which is evaluated while the tuple is built — before the trigger takes the advisory lock | Reproduced: 8 concurrent writers, 320 events, **6 backward links** | Default dropped; the trigger allocates inside the lock |
+| 2 | `jsonb_build_object` serialises `timestamptz` through the *session* `TimeZone`, so the same instant hashes differently per writer | Assertion 19 fails against the previous trigger | `occurred_at` rendered as explicit UTC text |
+| 3 | `payload_artifact_id` was not hashed, so an offloaded payload could be repointed with the chain still valid | Assertion 20 fails against the previous trigger | Added to the canonical object |
+| 4 | Companion §4.2 described a different layout entirely (delimiter-concatenated, payload digest, 64-zero genesis) | Read against the SQL | §4.2 rewritten to the executed layout, and assertion 19 re-implements it independently so the two cannot drift again |
+| 5 | No assertion executed `TRUNCATE` | Assertion 18 fails with the trigger dropped | Assertion 18 added |
+| 6 | No index served `WHERE workspace_id = ? ORDER BY sequence DESC` | Read against `pg_indexes` | `events_workspace_sequence_idx` added |
+
+A seventh defect was found while fixing these, in this package's own document
+rather than in the review: `payload_artifact_id` was tagged `[V12] field` in the
+artifact. v1.2 never names that column — only the ">256 KiB … referenced by
+UUID and SHA-256" rule that motivates it. Tagging an invented column as
+recovered source is precisely what `CONT-LOCAL-GOV-001` prohibits, so the tag is
+now `[DERIVED] column; [V12] >256 KiB offload rule`.
+
+### The race was reproduced, not reasoned about
+
+Finding 1 is the one that matters, and it is invisible to every test that writes
+events one at a time. Restoring the column default and running eight concurrent
+writers produced six events whose `previous_hash` pointed at a *later* event —
+a ledger that verifies as broken despite the advisory lock doing exactly what it
+was written to do. With the allocation moved inside the lock, the same load
+produces an intact chain.
+
+`sequence` is now also part of the hashed canonical form. The lock makes the
+chain correct as it is written; hashing the position makes reordering detectable
+afterwards, which is what a tamper-evident ledger is for.
+
+### Local verification
+
+PostgreSQL 18 with pgvector is not available in the review sandbox, and CI
+remains the authority for the full schema. The new logic was nonetheless
+exercised locally against PostgreSQL 16 on a reduced schema carrying the real
+trigger: each of assertions 18–21 was run against both the fixed and the
+pre-fix definition, and each fails on its own defect rather than passing
+vacuously.
 
 ## What this package deliberately does not do
 

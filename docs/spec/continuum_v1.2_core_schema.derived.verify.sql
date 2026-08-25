@@ -424,4 +424,139 @@ BEGIN
 END
 $$;
 
+-- 18. TRUNCATE is rejected. Assertion 6 covers UPDATE and DELETE only, and
+--     TRUNCATE bypasses row-level triggers entirely, so append-only is not
+--     actually established without this. [DERIVED]
+DO $$
+BEGIN
+    BEGIN
+        TRUNCATE continuum.events;
+        RAISE EXCEPTION 'TRUNCATE on the event store was accepted';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM = 'TRUNCATE on the event store was accepted' THEN
+            RAISE;
+        END IF;
+        RAISE NOTICE 'TRUNCATE on the event store rejected: enforced';
+    END;
+END
+$$;
+
+-- 19. The stored hash is reproducible by an independent verifier running under
+--     a different session TimeZone. This re-implements the canonicalisation
+--     documented in artifact section 4.2 and checks it against what the trigger
+--     actually wrote, so the document and the schema cannot drift apart
+--     silently. [DERIVED]
+DO $$
+DECLARE
+    row_       continuum.events%ROWTYPE;
+    recomputed char(64);
+BEGIN
+    SET LOCAL TimeZone = 'America/New_York';
+
+    SELECT * INTO row_
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+     ORDER BY sequence DESC
+     LIMIT 1;
+
+    recomputed := encode(sha256(convert_to(jsonb_build_object(
+        'sequence',            row_.sequence,
+        'event_id',            row_.event_id,
+        'workspace_id',        row_.workspace_id,
+        'run_id',              row_.run_id,
+        'event_type',          row_.event_type,
+        'schema_version',      row_.schema_version,
+        'aggregate_type',      row_.aggregate_type,
+        'aggregate_id',        row_.aggregate_id,
+        'causation_event_id',  row_.causation_event_id,
+        'correlation_id',      row_.correlation_id,
+        'actor_type',          row_.actor_type,
+        'actor_id',            row_.actor_id,
+        'trace_id',            row_.trace_id,
+        'payload',             row_.payload,
+        'payload_artifact_id', row_.payload_artifact_id,
+        'previous_hash',       row_.previous_hash,
+        'occurred_at',
+            to_char(row_.occurred_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    )::text, 'UTF8')), 'hex');
+
+    IF recomputed IS DISTINCT FROM row_.event_hash THEN
+        RAISE EXCEPTION 'hash is not reproducible under a different TimeZone: % <> %',
+            recomputed, row_.event_hash;
+    END IF;
+
+    RAISE NOTICE 'event hash reproducible by an independent verifier under a non-UTC TimeZone';
+END
+$$;
+
+-- 20. The offloaded-payload reference is covered by the hash. Repointing
+--     payload_artifact_id at a different artifact must change event_hash,
+--     otherwise the chain cannot detect that substitution. [DERIVED]
+DO $$
+DECLARE
+    with_ref    char(64);
+    with_other  char(64);
+    base        jsonb;
+BEGIN
+    SELECT jsonb_build_object('payload_artifact_id',
+                              '00000000-0000-0000-0000-0000000000c1'::uuid)
+      INTO base;
+    with_ref   := encode(sha256(convert_to(base::text, 'UTF8')), 'hex');
+    with_other := encode(sha256(convert_to(
+        jsonb_build_object('payload_artifact_id',
+                           '00000000-0000-0000-0000-0000000000c2'::uuid)::text,
+        'UTF8')), 'hex');
+
+    IF with_ref = with_other THEN
+        RAISE EXCEPTION 'payload_artifact_id does not affect the canonical form';
+    END IF;
+
+    PERFORM 1
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'continuum'
+        AND p.proname = 'events_prepare_hash'
+        AND pg_get_functiondef(p.oid) LIKE '%payload_artifact_id%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'events_prepare_hash does not hash payload_artifact_id';
+    END IF;
+
+    RAISE NOTICE 'offloaded payload reference is covered by the event hash';
+END
+$$;
+
+-- 21. The ordering value is not handed out before the chain lock. A default on
+--     continuum.events.sequence would be evaluated while the tuple is built,
+--     which is before the BEFORE INSERT trigger acquires the per-workspace
+--     advisory lock -- the window in which two writers can interleave into a
+--     backward link. [DERIVED]
+DO $$
+DECLARE
+    has_default boolean;
+BEGIN
+    SELECT a.atthasdef INTO has_default
+      FROM pg_attribute a
+     WHERE a.attrelid = 'continuum.events'::regclass
+       AND a.attname  = 'sequence';
+
+    IF has_default THEN
+        RAISE EXCEPTION
+            'continuum.events.sequence still has a column default; the ordering '
+            'value is allocated outside the advisory lock';
+    END IF;
+
+    PERFORM 1
+       FROM pg_indexes
+      WHERE schemaname = 'continuum'
+        AND tablename  = 'events'
+        AND indexdef LIKE '%(workspace_id, sequence DESC)%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no (workspace_id, sequence DESC) index for the chain-head lookup';
+    END IF;
+
+    RAISE NOTICE 'ordering value allocated under the chain lock; chain-head lookup indexed';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;

@@ -236,7 +236,7 @@ CREATE TABLE continuum.evidence (
     valid_until         timestamptz,                                  -- [V11]
     trust_score         double precision NOT NULL                     -- [V11] ge=0 le=1
         CHECK (trust_score BETWEEN 0 AND 1),
-    payload             continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V11]
+    payload             continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V11 shape] [DERIVED bound]
     payload_artifact_id uuid,                                         -- [V12] >256 KiB to S3
     trace_id            char(32),                                     -- [V11]
     created_at          timestamptz NOT NULL DEFAULT now(),            -- [V11]
@@ -598,7 +598,7 @@ CREATE TABLE continuum.artifacts (
     producer_component  text NOT NULL,                                -- [V12]
     producer_version    text NOT NULL,                                -- [V12]
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                 -- [V12]
-    metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V12]
+    metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V12] [DERIVED bound]
     created_at          timestamptz NOT NULL DEFAULT now()            -- [V12] required
 );
 
@@ -654,7 +654,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
     trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
-    payload             continuum.jsonb_256k NOT NULL,                               -- [V12 name] [V11 shape]
+    payload             continuum.jsonb_256k NOT NULL,                               -- [V12 name] [V11 shape] [DERIVED bound]
     payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
     previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
     -- NOT NULL is retained: BEFORE ROW triggers fire before constraints are
@@ -669,6 +669,24 @@ CREATE INDEX events_run_idx ON continuum.events (run_id, sequence);   -- [V11]
 CREATE INDEX events_aggregate_idx
     ON continuum.events (workspace_id, aggregate_type, aggregate_id, sequence);  -- [DERIVED]
 
+-- [DERIVED] Chain-head lookup. events_aggregate_idx cannot serve
+-- `WHERE workspace_id = ? ORDER BY sequence DESC LIMIT 1` because
+-- aggregate_type and aggregate_id sit between the two columns that matter, so
+-- without this index an insert for a quiet workspace walks the global sequence
+-- index back through unrelated history.
+CREATE INDEX events_workspace_sequence_idx
+    ON continuum.events (workspace_id, sequence DESC);
+
+-- [DERIVED] The bigserial default is evaluated while the tuple is built, which
+-- is BEFORE this table's BEFORE INSERT trigger runs and therefore outside the
+-- per-workspace advisory lock. Two concurrent inserts could take sequence 1 and
+-- 2, commit in the order 2 then 1, and leave sequence 1 chained to sequence 2 --
+-- a chain that reads as broken when verified in sequence order. Dropping the
+-- default moves allocation into the trigger, inside the lock, so the ordering
+-- value and the chain head are decided in one critical section. The sequence
+-- object itself is retained and still owned by the column.
+ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
+
 -- [DERIVED] Server-side hash chain. v1.2 states that the previous_hash/
 -- event_hash chain "allows Continuum to detect silent modification of audit
 -- history" and requires a continuum_event_hash_failures_total metric, but does
@@ -676,8 +694,9 @@ CREATE INDEX events_aggregate_idx
 -- application means no caller can write an event whose hash does not match its
 -- own contents.
 --
--- Two deliberate choices, both learned from probing an alternative
--- implementation against PostgreSQL 18:
+-- Four deliberate choices. The first two were learned from probing an
+-- alternative implementation against PostgreSQL 18; the last two from review of
+-- this implementation:
 --
 --   1. sha256() rather than pgcrypto's digest(). This function is SECURITY
 --      DEFINER with a hardened search_path that excludes public; pgcrypto
@@ -690,6 +709,17 @@ CREATE INDEX events_aggregate_idx
 --      -- so every event written in one transaction ties, and ordering would
 --      fall back to a random uuid. A tamper-evident ledger whose order is not
 --      reconstructible is not doing its job.
+--
+--   3. `sequence` is allocated inside this function rather than by a column
+--      default, and is itself hashed. Allocating it here puts it under the same
+--      advisory lock as the chain-head read, so two concurrent writers cannot
+--      interleave into a backward link; hashing it binds the ordering into the
+--      chain, so events cannot be silently reordered afterwards either.
+--
+--   4. occurred_at is rendered as explicit UTC text. jsonb_build_object
+--      serialises a timestamptz through the session TimeZone, so two writers
+--      with different settings would hash the same instant differently and no
+--      verifier could reproduce either hash from the stored row.
 --
 -- The canonical byte layout is [DECISION] and must be fixed by ADR before the
 -- first event is written: changing it later invalidates every existing chain.
@@ -704,6 +734,10 @@ DECLARE
     canonical jsonb;
 BEGIN
     PERFORM pg_advisory_xact_lock(hashtextextended(NEW.workspace_id::text, 0));
+
+    -- Allocated here, not by a column default, so that the ordering value and
+    -- the chain head below are chosen inside the same critical section.
+    NEW.sequence := nextval('continuum.events_sequence_seq');
 
     SELECT e.event_hash INTO head_hash
       FROM continuum.events e
@@ -720,6 +754,7 @@ BEGIN
     NEW.previous_hash := head_hash;
 
     canonical := jsonb_build_object(
+        'sequence',           NEW.sequence,
         'event_id',           NEW.event_id,
         'workspace_id',       NEW.workspace_id,
         'run_id',             NEW.run_id,
@@ -733,8 +768,15 @@ BEGIN
         'actor_id',           NEW.actor_id,
         'trace_id',           NEW.trace_id,
         'payload',            NEW.payload,
+        'payload_artifact_id', NEW.payload_artifact_id,
         'previous_hash',      NEW.previous_hash,
-        'occurred_at',        NEW.occurred_at
+        -- Rendered explicitly in UTC. jsonb_build_object would serialise a
+        -- timestamptz through the *session* TimeZone, so the same instant would
+        -- hash differently for two writers, and a later verifier could not
+        -- reproduce the hash from the stored row.
+        'occurred_at',
+            to_char(NEW.occurred_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
     );
 
     NEW.event_hash := encode(sha256(convert_to(canonical::text, 'UTF8')), 'hex');
