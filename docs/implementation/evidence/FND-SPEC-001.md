@@ -113,13 +113,15 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
 20. `payload_artifact_id` is covered by the hash.
 21. The ordering value has no column default, and the chain-head lookup is
     indexed.
+22. The hash layout is versioned per row, the version has no column default,
+    and the version is itself hashed.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–21 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–22 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -137,7 +139,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–21
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–22
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -233,6 +235,38 @@ trigger: each of assertions 18–21 was run against both the fixed and the
 pre-fix definition, and each fails on its own defect rather than passing
 vacuously.
 
+## The canonicalisation decision, and why it stopped being urgent
+
+`ADR-0002` settles the highest-consequence item on the artifact's decision list.
+The substance of the ADR is not the layout — it is that the layout no longer has
+to be right the first time.
+
+`continuum.events.hash_version` records which canonicalisation each row was
+written under, and is itself covered by the hash. A future layout is therefore
+additive: new events carry version 2, events already written still verify under
+version 1, and no chain is invalidated. What made this decision urgent was never
+the byte layout, which is an ordinary engineering choice; it was that the choice
+appeared to be a one-way door. Versioning removes the door for the cost of one
+`smallint`.
+
+Version 1 is the layout the schema already executes and CI already verifies, so
+ratifying it changed no hashes.
+
+Two properties were tested rather than asserted:
+
+| Claim | Test |
+|---|---|
+| The version cannot disagree with the code that computed the hash | Assertion 22 fails with `hash_version has a column default` if the column is given one |
+| Flipping the column cannot make a verifier apply the wrong layout | Assertion 22 fails with `events_prepare_hash does not hash hash_version` if the version is dropped from the canonical form |
+
+The ADR also claims that assertion 19 keeps the document and the schema from
+drifting apart. That claim was checked directly: with the trigger changed to
+stop hashing `hash_version` while the documented recompute still did, assertion
+19 failed with `hash is not reproducible`. The check is real, not decorative.
+
+**`SRC-001` stays open.** It covers roughly thirty `[DECISION]` items and this
+resolves one. `FND-DB-DOMAIN` stays blocked.
+
 ## What this package deliberately does not do
 
 It **does not close `SRC-001`**. Issue #2's second close criterion requires
@@ -243,10 +277,9 @@ are separate and outstanding.
 It **does not unblock `FND-DB-DOMAIN`**, which stays `blocked` until those
 decisions are approved.
 
-The highest-priority decision is the **event hash canonicalisation** (artifact
-§4.2). The original byte layout is unknown, and changing it after any event is
-written invalidates every existing chain — so it must be fixed by ADR before the
-event store takes its first write.
+The highest-priority decision **was** the event hash canonicalisation (artifact
+§4.2); it is resolved by `ADR-0002` and is no longer a one-way door. The
+remaining `[DECISION]` items are unaffected and still require ADRs.
 
 ## Second round: an independently produced candidate DDL
 

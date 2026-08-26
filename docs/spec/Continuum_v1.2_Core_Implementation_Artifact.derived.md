@@ -290,7 +290,7 @@ CREATE TABLE continuum.evidence (
     valid_until   timestamptz,                                       -- [V11] Evidence.valid_until
     trust_score   double precision NOT NULL                          -- [V11] Evidence.trust_score, ge=0 le=1
         CHECK (trust_score BETWEEN 0 AND 1),
-    payload       jsonb NOT NULL DEFAULT '{}'::jsonb,                -- [V11] Evidence.payload
+    payload       continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb, -- [V11] Evidence.payload, [DERIVED] bound
     payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     trace_id      char(32),                                          -- [V11] universal column rule
     created_at    timestamptz NOT NULL DEFAULT now()                 -- [V11]
@@ -618,7 +618,7 @@ CREATE TABLE continuum.artifacts (
     producer_component  text NOT NULL,                               -- [V12] producer.component
     producer_version    text NOT NULL,                               -- [V12] producer.version
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                -- [V12]
-    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb,          -- [V12]
+    metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,  -- [V12], [DERIVED] bound
     created_at          timestamptz NOT NULL DEFAULT now()           -- [V12] required
 );
 
@@ -681,6 +681,7 @@ CREATE TABLE continuum.events (
     payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     previous_hash       char(64),                                    -- [V12] field
     event_hash          char(64) NOT NULL,                           -- [V12] field
+    hash_version        smallint NOT NULL,                           -- [DECISION: ADR-0002]
     occurred_at         timestamptz NOT NULL,                        -- [V12] field
     ingested_at         timestamptz NOT NULL DEFAULT now()           -- [V12] field
 );
@@ -730,6 +731,11 @@ v1.2 states the chain detects silent modification of audit history, and requires
 **must be fixed by ADR before any event is written**, since changing it later
 invalidates every existing chain.
 
+**Fixed by ADR-0002 as layout version 1.** `events.hash_version` records the
+layout each event was written under, so this is revisable: a version 2 would
+apply to new events while events already written continue to verify under
+version 1.
+
 The canonicalisation below is **normative and is the one the schema executes**
 (`continuum.events_prepare_hash()` in
 `continuum_v1.2_core_schema.derived.sql`). A verifier written from this section
@@ -739,6 +745,7 @@ is the defect. `[DERIVED]`
 
 ```text
 canonical  = jsonb_build_object(     -- key order as written; jsonb sorts keys
+    'hash_version',        hash_version,      -- 1
     'sequence',            sequence,
     'event_id',            event_id,
     'workspace_id',        workspace_id,
@@ -780,6 +787,8 @@ absence was a defect:
   chain exists to detect.
 - **`sequence` is included.** It binds each event to its position, so the chain
   detects reordering and not merely edits.
+- **`hash_version` is included.** Covering the version by the hash stops the
+  column being flipped to make a verifier apply the wrong layout to a row.
 
 `previous_hash` is the `event_hash` of the preceding event in the same
 `workspace_id` chain, ordered by `sequence`, and **SQL `NULL` for the genesis
@@ -1008,9 +1017,13 @@ Constraints these must satisfy, all `[V12]`:
 
 **Ordered by consequence:**
 
-1. **Event hash canonicalisation** (§4.2) — highest priority. Changing this
-   after any event is written invalidates every existing chain, so it must be
-   fixed before the event store takes its first write.
+1. ~~**Event hash canonicalisation** (§4.2)~~ — **RESOLVED by ADR-0002.**
+   Version 1 is the layout §4.2 documents and the schema executes. The decision
+   is also no longer irreversible: `events.hash_version` records the layout each
+   row was written under, so a future layout applies to new events while
+   existing chains still verify. This was the highest-consequence item on the
+   list; what made it urgent was not the layout but the fact that it could never
+   be changed.
 2. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
 3. **Language dependency versions** (§6.2) — deliberately unpinned here.
 4. **`users` / `models` exemption from RLS** (§5).

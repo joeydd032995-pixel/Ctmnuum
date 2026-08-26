@@ -661,6 +661,13 @@ CREATE TABLE continuum.events (
     -- checked, so the trigger always populates this, and the constraint still
     -- catches the case where the trigger is ever dropped.
     event_hash          char(64) NOT NULL,                            -- [V12 name] [DERIVED shape]
+    -- [DECISION: ADR-0002] Identifies which canonicalisation produced
+    -- event_hash. Set by the hash trigger, never defaulted, and itself part of
+    -- the hashed form. Without it the byte layout is a one-way door: any later
+    -- change would invalidate every chain ever written. With it, a verifier
+    -- selects the layout the row was written under, so a future layout can be
+    -- introduced for new events while old events still verify.
+    hash_version        smallint NOT NULL,                            -- [DECISION: ADR-0002]
     occurred_at         timestamptz NOT NULL,                         -- [V12 name] [DERIVED shape]
     ingested_at         timestamptz NOT NULL DEFAULT now()            -- [V12 name] [DERIVED shape]
 );
@@ -694,7 +701,7 @@ ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
 -- application means no caller can write an event whose hash does not match its
 -- own contents.
 --
--- Four deliberate choices. The first two were learned from probing an
+-- Five deliberate choices. The first two were learned from probing an
 -- alternative implementation against PostgreSQL 18; the last two from review of
 -- this implementation:
 --
@@ -716,13 +723,22 @@ ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
 --      interleave into a backward link; hashing it binds the ordering into the
 --      chain, so events cannot be silently reordered afterwards either.
 --
---   4. occurred_at is rendered as explicit UTC text. jsonb_build_object
+--   4. hash_version is written by this function and covered by the hash. The
+--      canonical layout is otherwise a one-way door -- changing it after the
+--      first event invalidates every chain. Recording the version per row makes
+--      a future layout additive: new events are written under version 2 while
+--      existing events still verify under version 1. Covering it by the hash
+--      stops an attacker flipping the column to make a verifier apply the wrong
+--      layout. See ADR-0002.
+--
+--   5. occurred_at is rendered as explicit UTC text. jsonb_build_object
 --      serialises a timestamptz through the session TimeZone, so two writers
 --      with different settings would hash the same instant differently and no
 --      verifier could reproduce either hash from the stored row.
 --
--- The canonical byte layout is [DECISION] and must be fixed by ADR before the
--- first event is written: changing it later invalidates every existing chain.
+-- The canonical byte layout is fixed by ADR-0002 as version 1. It is no longer
+-- a one-way door: hash_version records which layout each row was written under,
+-- so a version 2 can be introduced without invalidating existing chains.
 CREATE OR REPLACE FUNCTION continuum.events_prepare_hash()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -753,7 +769,12 @@ BEGIN
 
     NEW.previous_hash := head_hash;
 
+    -- Written by the code that computes the hash, so the two can never
+    -- disagree. Bump this constant and branch below to introduce a layout 2.
+    NEW.hash_version := 1;
+
     canonical := jsonb_build_object(
+        'hash_version',       NEW.hash_version,
         'sequence',           NEW.sequence,
         'event_id',           NEW.event_id,
         'workspace_id',       NEW.workspace_id,

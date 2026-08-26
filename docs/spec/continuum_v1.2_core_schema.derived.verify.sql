@@ -460,6 +460,7 @@ BEGIN
      LIMIT 1;
 
     recomputed := encode(sha256(convert_to(jsonb_build_object(
+        'hash_version',        row_.hash_version,
         'sequence',            row_.sequence,
         'event_id',            row_.event_id,
         'workspace_id',        row_.workspace_id,
@@ -556,6 +557,51 @@ BEGIN
     END IF;
 
     RAISE NOTICE 'ordering value allocated under the chain lock; chain-head lookup indexed';
+END
+$$;
+
+-- 22. The hash layout is versioned per row, and the version is itself hashed.
+--     Without this the canonicalisation is a one-way door: any later change
+--     invalidates every chain ever written. ADR-0002. [DECISION: ADR-0002]
+DO $$
+DECLARE
+    has_default  boolean;
+    versions     integer;
+    nulls        integer;
+BEGIN
+    -- Written by the trigger, never defaulted, so the value cannot disagree
+    -- with the code that computed the hash beside it.
+    SELECT a.atthasdef INTO has_default
+      FROM pg_attribute a
+     WHERE a.attrelid = 'continuum.events'::regclass
+       AND a.attname  = 'hash_version';
+    IF has_default THEN
+        RAISE EXCEPTION 'hash_version has a column default; it must be set by the hash trigger';
+    END IF;
+
+    SELECT count(DISTINCT hash_version), count(*) FILTER (WHERE hash_version IS NULL)
+      INTO versions, nulls
+      FROM continuum.events;
+    IF nulls <> 0 THEN
+        RAISE EXCEPTION '% events carry no hash_version', nulls;
+    END IF;
+    IF versions <> 1 THEN
+        RAISE EXCEPTION 'expected one hash layout in use, found %', versions;
+    END IF;
+
+    -- Covered by the hash, so flipping the column cannot make a verifier apply
+    -- the wrong layout to a row.
+    PERFORM 1
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'continuum'
+        AND p.proname = 'events_prepare_hash'
+        AND pg_get_functiondef(p.oid) LIKE '%''hash_version'',%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'events_prepare_hash does not hash hash_version';
+    END IF;
+
+    RAISE NOTICE 'hash layout is versioned per row and the version is hashed';
 END
 $$;
 
