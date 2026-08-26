@@ -836,6 +836,13 @@ GRANT USAGE ON SEQUENCE continuum.events_sequence_seq TO continuum_app;
 -- ---------------------------------------------------------------------------
 -- 16. Row Level Security                                               [V12]
 -- ---------------------------------------------------------------------------
+--
+-- [DERIVED] Each predicate calls the helper through a scalar subquery,
+-- `(SELECT continuum.current_workspace_id())`, rather than calling it
+-- directly. The function is STABLE, but a STABLE function written directly
+-- into a policy qual is still re-evaluated per row; wrapping it makes the
+-- planner hoist it into a one-time InitPlan. Same semantics, one call per
+-- query instead of one per row scanned.
 
 DO $$
 DECLARE
@@ -853,8 +860,8 @@ BEGIN
         EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I '
-            'USING (workspace_id = continuum.current_workspace_id()) '
-            'WITH CHECK (workspace_id = continuum.current_workspace_id())',
+            'USING (workspace_id = (SELECT continuum.current_workspace_id())) '
+            'WITH CHECK (workspace_id = (SELECT continuum.current_workspace_id()))',
             t || '_tenant_isolation', t);
     END LOOP;
 END
@@ -873,12 +880,12 @@ BEGIN
         EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I FOR SELECT '
-            'USING (workspace_id = continuum.current_workspace_id() '
+            'USING (workspace_id = (SELECT continuum.current_workspace_id()) '
             '       OR workspace_id IS NULL)', t || '_read', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I FOR ALL '
-            'USING (workspace_id = continuum.current_workspace_id()) '
-            'WITH CHECK (workspace_id = continuum.current_workspace_id())',
+            'USING (workspace_id = (SELECT continuum.current_workspace_id())) '
+            'WITH CHECK (workspace_id = (SELECT continuum.current_workspace_id()))',
             t || '_write', t);
     END LOOP;
 END
@@ -889,11 +896,45 @@ $$;
 ALTER TABLE continuum.workspaces ENABLE ROW LEVEL SECURITY;
 ALTER TABLE continuum.workspaces FORCE  ROW LEVEL SECURITY;
 CREATE POLICY workspaces_tenant_isolation ON continuum.workspaces
-    USING (id = continuum.current_workspace_id())
-    WITH CHECK (id = continuum.current_workspace_id());
+    USING (id = (SELECT continuum.current_workspace_id()))
+    WITH CHECK (id = (SELECT continuum.current_workspace_id()));
 
 -- [DECISION] users and models are not workspace-scoped; governed by grants.
 REVOKE ALL ON SCHEMA continuum FROM PUBLIC;
 GRANT USAGE ON SCHEMA continuum TO continuum_app;
+
+-- [DERIVED] Table privileges for the application role. Row Level Security
+-- constrains WHICH rows a role may touch; it does not grant the privilege to
+-- touch any. Without these grants continuum_app could not read or write 24 of
+-- the 25 tables, every tenant policy below would be unreachable, and no test
+-- that runs as a superuser would notice -- superusers bypass RLS entirely,
+-- FORCE included, so the predicates are never evaluated.
+--
+-- [DECISION] No DELETE is granted anywhere. v1.2 supersedes rather than
+-- deletes (`superseded_by` on claims and memories, promotion stages on
+-- mutations), so least privilege is the safer default for a security boundary
+-- until an ADR establishes a hard-delete path. workspaces, users and models are
+-- read-only to the application: creating a tenant or registering a model is an
+-- administrative act.
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'workspace_members','runs','artifacts','agents','agent_versions',
+        'model_metrics','evidence','claims','claim_evidence','memories',
+        'memory_embeddings','memory_edges','failures','tools','tool_versions',
+        'tool_executions','evaluations','evaluation_results','mutations',
+        'mutation_evaluations','cost_events'
+    ] LOOP
+        EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE ON continuum.%I TO continuum_app', t);
+    END LOOP;
+
+    FOREACH t IN ARRAY ARRAY['workspaces','users','models'] LOOP
+        EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_app', t);
+    END LOOP;
+END
+$$;
 GRANT USAGE, CREATE ON SCHEMA continuum TO continuum_migration;
 GRANT USAGE ON SCHEMA continuum TO continuum_maintenance;

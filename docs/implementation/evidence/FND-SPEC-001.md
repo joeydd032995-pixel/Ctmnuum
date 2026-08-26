@@ -115,13 +115,17 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     indexed.
 22. The hash layout is versioned per row, the version has no column default,
     and the version is itself hashed.
+23. Tenant isolation holds **in behaviour**, tested as `continuum_app` rather
+    than as the superuser: own rows visible, another tenant's rows not, a
+    cross-tenant write rejected, built-in agents readable, and no rows at all
+    when the tenant context is unset.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–22 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–23 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -139,7 +143,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–22
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–23
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -266,6 +270,71 @@ stop hashing `hash_version` while the documented recompute still did, assertion
 
 **`SRC-001` stays open.** It covers roughly thirty `[DECISION]` items and this
 resolves one. `FND-DB-DOMAIN` stays blocked.
+
+## Fourth round: the RLS hard gate was never actually tested
+
+Applying a PostgreSQL review checklist to the schema surfaced two defects that
+share a shape with the candidate's unreachable `digest()` — individually correct
+declarations that do not connect, invisible to reading, and found only by
+executing as the role that matters.
+
+### The tenant policies were never evaluated
+
+Assertion 5 reads `pg_class.relrowsecurity` and `relforcerowsecurity`. That
+proves RLS is *switched on*; it says nothing about what any policy does. And
+the verify script runs as `postgres`, a superuser — superusers bypass RLS
+entirely, `FORCE` included, so no policy predicate had ever been evaluated.
+
+Demonstrated rather than argued: with the policy replaced by the tautology
+`USING (workspace_id = workspace_id)`, which isolates nothing, assertion 5 still
+reported *"RLS enabled and forced on all tenant-scoped tables"*. v1.2 states the
+hard gate as **zero cross-workspace access**; what was being verified was that a
+boolean column was `true`.
+
+Assertion 23 drops to `continuum_app` (`NOLOGIN NOBYPASSRLS`) and tests the gate
+itself. Against the tautological policy it fails with `cross-workspace read: 1
+row(s) belonging to another tenant are visible`.
+
+Assertion 13 has the same weakness — it greps the policy *text* in `pg_policies`
+for `IS NULL`. Assertion 23 now reads an actual built-in agent row as an ordinary
+tenant, and fails if that row is invisible.
+
+### The application role could not reach 24 of the 25 tables
+
+`continuum_app` held table privileges on `continuum.events` alone. Row Level
+Security constrains *which* rows a role may touch; it does not grant the
+privilege to touch any. Every other tenant policy was therefore unreachable —
+and a superuser-only test could never notice, because a superuser needs no
+grant.
+
+Table privileges are now granted explicitly. `[DECISION]`: no `DELETE` is
+granted anywhere, because v1.2 supersedes rather than deletes (`superseded_by`
+on claims and memories, promotion stages on mutations), so least privilege is
+the safer default for a security boundary until an ADR establishes a hard-delete
+path. `workspaces`, `users` and `models` are read-only to the application.
+
+Assertion 23 fails with `permission denied for table memories` if the grants are
+removed.
+
+### RLS predicates evaluate once per query, not once per row
+
+Each policy calls the helper through a scalar subquery,
+`(SELECT continuum.current_workspace_id())`. The function is already `STABLE`,
+but a `STABLE` function written directly into a policy qual is still
+re-evaluated per row; wrapping it lets the planner hoist it into a one-time
+InitPlan. Identical semantics — assertion 23 exercises the wrapped form.
+
+### Verification
+
+Each failure mode was reproduced against the real policy and grant text,
+extracted from the schema file rather than retyped:
+
+| Defect introduced | Assertion 23 result |
+|---|---|
+| Tautological policy | `cross-workspace read: 1 row(s) … visible` |
+| Table privileges revoked | `permission denied for table memories` |
+| Built-in agents dropped from the read policy | `built-in agents are invisible to a tenant under RLS` |
+| None (correct schema) | passes |
 
 ## What this package deliberately does not do
 

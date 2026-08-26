@@ -605,4 +605,80 @@ BEGIN
 END
 $$;
 
+-- A built-in agent: workspace_id IS NULL means shared by every tenant.
+-- Assertion 13 checks only that the policy TEXT mentions IS NULL; assertion 23
+-- below reads this row as an ordinary tenant, which is the actual claim.
+INSERT INTO continuum.agents (id, workspace_id, name, role)
+VALUES ('00000000-0000-0000-0000-0000000000d1', NULL, 'builtin-falsifier', 'falsifier');
+
+-- 23. Tenant isolation is enforced in BEHAVIOUR, not merely configured.
+--
+--     Assertion 5 checks pg_class.relrowsecurity and relforcerowsecurity: it
+--     proves RLS is switched on, not that any policy does anything. A policy of
+--     `USING (workspace_id = workspace_id)` isolates nothing and still passes
+--     assertion 5. Nor would running these checks as the superuser help --
+--     superusers bypass RLS entirely, FORCE included, so the predicate is never
+--     evaluated. This assertion therefore drops to continuum_app, the role the
+--     application actually uses, which is NOLOGIN NOBYPASSRLS.
+--
+--     v1.2 states the hard gate as zero cross-workspace access. This is the
+--     assertion that tests it. [V12]
+DO $$
+DECLARE
+    ws_a       constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    ws_b       constant uuid := '00000000-0000-0000-0000-0000000000bb';
+    seen_own   integer;
+    seen_other integer;
+    seen_unset integer;
+    builtin    integer;
+BEGIN
+    SET LOCAL ROLE continuum_app;
+
+    PERFORM set_config('app.workspace_id', ws_a::text, true);
+
+    SELECT count(*) INTO seen_own
+      FROM continuum.memories WHERE workspace_id = ws_a;
+    IF seen_own = 0 THEN
+        RAISE EXCEPTION 'tenant cannot see its own rows; the policy is too strict';
+    END IF;
+
+    SELECT count(*) INTO seen_other
+      FROM continuum.memories WHERE workspace_id = ws_b;
+    IF seen_other <> 0 THEN
+        RAISE EXCEPTION
+            'cross-workspace read: % row(s) belonging to another tenant are visible',
+            seen_other;
+    END IF;
+
+    -- WITH CHECK must refuse a row planted into someone else's workspace.
+    BEGIN
+        INSERT INTO continuum.memories
+            (id, workspace_id, memory_type, content, content_hash)
+        VALUES (gen_random_uuid(), ws_b, 'semantic', 'planted', repeat('c', 64));
+        RAISE EXCEPTION 'cross-workspace write accepted';
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+
+    -- Built-in agents (workspace_id IS NULL) stay readable to every tenant.
+    SELECT count(*) INTO builtin
+      FROM continuum.agents WHERE workspace_id IS NULL;
+    IF builtin = 0 THEN
+        RAISE EXCEPTION 'built-in agents are invisible to a tenant under RLS';
+    END IF;
+
+    -- Fail closed: no tenant context must expose nothing, not everything.
+    PERFORM set_config('app.workspace_id', '', true);
+    SELECT count(*) INTO seen_unset FROM continuum.memories;
+    IF seen_unset <> 0 THEN
+        RAISE EXCEPTION
+            'unset tenant context exposed % row(s); RLS is not failing closed',
+            seen_unset;
+    END IF;
+
+    RAISE NOTICE
+        'tenant isolation enforced as continuum_app: own rows only, cross-tenant write rejected, fails closed';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;
