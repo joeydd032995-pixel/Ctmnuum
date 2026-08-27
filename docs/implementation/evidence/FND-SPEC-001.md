@@ -101,8 +101,31 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
 11. A promoted tool version cannot lack an immutable image digest.
 12. A risk-3/4 execution cannot be recorded without an approval.
 13. Built-in agents remain readable under the tenant policy.
+14. An oversized JSONB payload is rejected by the `jsonb_256k` domain.
+15. `memories.search_tsv` is generated and matches a full-text query.
+16. The event hash chain is computed server-side and follows `sequence` order,
+    including for several events written inside one transaction.
+17. A forged `previous_hash` is rejected rather than silently overwritten.
+18. `TRUNCATE` on the event store is rejected (it bypasses row-level triggers,
+    so assertion 6 alone does not establish append-only).
+19. The stored `event_hash` is reproducible by an independent verifier running
+    under a non-UTC session `TimeZone`.
+20. `payload_artifact_id` is covered by the hash.
+21. The ordering value has no column default, and the chain-head lookup is
+    indexed.
+22. The hash layout is versioned per row, the version has no column default,
+    and the version is itself hashed.
+23. Tenant isolation holds **in behaviour**, tested as `continuum_app` rather
+    than as the superuser: own rows visible, another tenant's rows not, a
+    cross-tenant write rejected, built-in agents readable, and no rows at all
+    when the tenant context is unset.
 
-Assertions 6–13 are the point of the exercise. v1.2 states these as hard gates
+Plus a concurrent-writer test that cannot be expressed in a single psql script:
+`scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
+workspace as separate autocommit statements and asserts the chain is intact in
+`sequence` order.
+
+Assertions 6–23 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -120,7 +143,8 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–13
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–23
+- `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
 - Artifact §8 lists every `[DECISION]` requiring ADR approval
@@ -170,6 +194,148 @@ genuinely enforced by a trigger. Finding 2 cannot be closed in-schema without an
 authenticated approval path, so the gate text was corrected to say what the
 constraint actually provides rather than what it was claimed to provide.
 
+## Third round: six findings on the server-side hash chain
+
+Automated review of the adopted hash trigger returned six findings, two of them
+P1. All six were verified against the source and all six were correct. They are
+worth recording because five of the six are defects that only appear under
+conditions a single-session test does not create.
+
+| # | Finding | Verified how | Resolution |
+|---:|---|---|---|
+| 1 | `sequence` is allocated by the `bigserial` default, which is evaluated while the tuple is built — before the trigger takes the advisory lock | Reproduced: 8 concurrent writers, 320 events, **6 backward links** | Default dropped; the trigger allocates inside the lock |
+| 2 | `jsonb_build_object` serialises `timestamptz` through the *session* `TimeZone`, so the same instant hashes differently per writer | Assertion 19 fails against the previous trigger | `occurred_at` rendered as explicit UTC text |
+| 3 | `payload_artifact_id` was not hashed, so an offloaded payload could be repointed with the chain still valid | Assertion 20 fails against the previous trigger | Added to the canonical object |
+| 4 | Companion §4.2 described a different layout entirely (delimiter-concatenated, payload digest, 64-zero genesis) | Read against the SQL | §4.2 rewritten to the executed layout, and assertion 19 re-implements it independently so the two cannot drift again |
+| 5 | No assertion executed `TRUNCATE` | Assertion 18 fails with the trigger dropped | Assertion 18 added |
+| 6 | No index served `WHERE workspace_id = ? ORDER BY sequence DESC` | Read against `pg_indexes` | `events_workspace_sequence_idx` added |
+
+A seventh defect was found while fixing these, in this package's own document
+rather than in the review: `payload_artifact_id` was tagged `[V12] field` in the
+artifact. v1.2 never names that column — only the ">256 KiB … referenced by
+UUID and SHA-256" rule that motivates it. Tagging an invented column as
+recovered source is precisely what `CONT-LOCAL-GOV-001` prohibits, so the tag is
+now `[DERIVED] column; [V12] >256 KiB offload rule`.
+
+### The race was reproduced, not reasoned about
+
+Finding 1 is the one that matters, and it is invisible to every test that writes
+events one at a time. Restoring the column default and running eight concurrent
+writers produced six events whose `previous_hash` pointed at a *later* event —
+a ledger that verifies as broken despite the advisory lock doing exactly what it
+was written to do. With the allocation moved inside the lock, the same load
+produces an intact chain.
+
+`sequence` is now also part of the hashed canonical form. The lock makes the
+chain correct as it is written; hashing the position makes reordering detectable
+afterwards, which is what a tamper-evident ledger is for.
+
+### Local verification
+
+PostgreSQL 18 with pgvector is not available in the review sandbox, and CI
+remains the authority for the full schema. The new logic was nonetheless
+exercised locally against PostgreSQL 16 on a reduced schema carrying the real
+trigger: each of assertions 18–21 was run against both the fixed and the
+pre-fix definition, and each fails on its own defect rather than passing
+vacuously.
+
+## The canonicalisation decision, and why it stopped being urgent
+
+`ADR-0002` settles the highest-consequence item on the artifact's decision list.
+The substance of the ADR is not the layout — it is that the layout no longer has
+to be right the first time.
+
+`continuum.events.hash_version` records which canonicalisation each row was
+written under, and is itself covered by the hash. A future layout is therefore
+additive: new events carry version 2, events already written still verify under
+version 1, and no chain is invalidated. What made this decision urgent was never
+the byte layout, which is an ordinary engineering choice; it was that the choice
+appeared to be a one-way door. Versioning removes the door for the cost of one
+`smallint`.
+
+Version 1 is the layout the schema already executes and CI already verifies, so
+ratifying it changed no hashes.
+
+Two properties were tested rather than asserted:
+
+| Claim | Test |
+|---|---|
+| The version cannot disagree with the code that computed the hash | Assertion 22 fails with `hash_version has a column default` if the column is given one |
+| Flipping the column cannot make a verifier apply the wrong layout | Assertion 22 fails with `events_prepare_hash does not hash hash_version` if the version is dropped from the canonical form |
+
+The ADR also claims that assertion 19 keeps the document and the schema from
+drifting apart. That claim was checked directly: with the trigger changed to
+stop hashing `hash_version` while the documented recompute still did, assertion
+19 failed with `hash is not reproducible`. The check is real, not decorative.
+
+**`SRC-001` stays open.** It covers roughly thirty `[DECISION]` items and this
+resolves one. `FND-DB-DOMAIN` stays blocked.
+
+## Fourth round: the RLS hard gate was never actually tested
+
+Applying a PostgreSQL review checklist to the schema surfaced two defects that
+share a shape with the candidate's unreachable `digest()` — individually correct
+declarations that do not connect, invisible to reading, and found only by
+executing as the role that matters.
+
+### The tenant policies were never evaluated
+
+Assertion 5 reads `pg_class.relrowsecurity` and `relforcerowsecurity`. That
+proves RLS is *switched on*; it says nothing about what any policy does. And
+the verify script runs as `postgres`, a superuser — superusers bypass RLS
+entirely, `FORCE` included, so no policy predicate had ever been evaluated.
+
+Demonstrated rather than argued: with the policy replaced by the tautology
+`USING (workspace_id = workspace_id)`, which isolates nothing, assertion 5 still
+reported *"RLS enabled and forced on all tenant-scoped tables"*. v1.2 states the
+hard gate as **zero cross-workspace access**; what was being verified was that a
+boolean column was `true`.
+
+Assertion 23 drops to `continuum_app` (`NOLOGIN NOBYPASSRLS`) and tests the gate
+itself. Against the tautological policy it fails with `cross-workspace read: 1
+row(s) belonging to another tenant are visible`.
+
+Assertion 13 has the same weakness — it greps the policy *text* in `pg_policies`
+for `IS NULL`. Assertion 23 now reads an actual built-in agent row as an ordinary
+tenant, and fails if that row is invisible.
+
+### The application role could not reach 24 of the 25 tables
+
+`continuum_app` held table privileges on `continuum.events` alone. Row Level
+Security constrains *which* rows a role may touch; it does not grant the
+privilege to touch any. Every other tenant policy was therefore unreachable —
+and a superuser-only test could never notice, because a superuser needs no
+grant.
+
+Table privileges are now granted explicitly. `[DECISION]`: no `DELETE` is
+granted anywhere, because v1.2 supersedes rather than deletes (`superseded_by`
+on claims and memories, promotion stages on mutations), so least privilege is
+the safer default for a security boundary until an ADR establishes a hard-delete
+path. `workspaces`, `users` and `models` are read-only to the application.
+
+Assertion 23 fails with `permission denied for table memories` if the grants are
+removed.
+
+### RLS predicates evaluate once per query, not once per row
+
+Each policy calls the helper through a scalar subquery,
+`(SELECT continuum.current_workspace_id())`. The function is already `STABLE`,
+but a `STABLE` function written directly into a policy qual is still
+re-evaluated per row; wrapping it lets the planner hoist it into a one-time
+InitPlan. Identical semantics — assertion 23 exercises the wrapped form.
+
+### Verification
+
+Each failure mode was reproduced against the real policy and grant text,
+extracted from the schema file rather than retyped:
+
+| Defect introduced | Assertion 23 result |
+|---|---|
+| Tautological policy | `cross-workspace read: 1 row(s) … visible` |
+| Table privileges revoked | `permission denied for table memories` |
+| Built-in agents dropped from the read policy | `built-in agents are invisible to a tenant under RLS` |
+| None (correct schema) | passes |
+
 ## What this package deliberately does not do
 
 It **does not close `SRC-001`**. Issue #2's second close criterion requires
@@ -180,10 +346,49 @@ are separate and outstanding.
 It **does not unblock `FND-DB-DOMAIN`**, which stays `blocked` until those
 decisions are approved.
 
-The highest-priority decision is the **event hash canonicalisation** (artifact
-§4.2). The original byte layout is unknown, and changing it after any event is
-written invalidates every existing chain — so it must be fixed by ADR before the
-event store takes its first write.
+The highest-priority decision **was** the event hash canonicalisation (artifact
+§4.2); it is resolved by `ADR-0002` and is no longer a one-way door. The
+remaining `[DECISION]` items are unaffected and still require ADRs.
+
+## Second round: an independently produced candidate DDL
+
+A second reconstruction of the same missing artifact was supplied for
+comparison. Rather than review it by reading, it was applied to the same
+PostgreSQL 18 + pgvector image in CI alongside a probe that exercised its event
+store and tenant isolation. Three defects surfaced, all of them by execution:
+
+| # | Defect | How it fails |
+|---:|---|---|
+| 1 | `SECURITY DEFINER` hash trigger calls `digest()` with `search_path` set to `pg_catalog, continuum` | `pgcrypto` installs `digest()` into `public`, which that path excludes. The function is unreachable, so the event store cannot accept a single row. |
+| 2 | 25 tenant tables take `workspace_id` from a session GUC with no default and no fallback | `not_null_violation` on every insert that does not set the GUC first. |
+| 3 | Chain head selected by `ingested_at` | Three events written in one transaction share one `now()`, so the tiebreak falls to a random UUID. The chain links, but its order is not reconstructible. |
+
+Defect 1 is the instructive one: it is invisible to a reader, because the
+function body and the `search_path` hardening are individually correct and are
+declared far apart. Only executing it shows that the combination has no
+`digest()` in scope.
+
+### What the candidate got right, and what was taken from it
+
+Four of its ideas were genuinely better than the first reconstruction and are
+adopted here:
+
+| Adopted | Why |
+|---|---|
+| `continuum.jsonb_256k` domain on `events.payload`, `evidence.payload`, `artifacts.metadata` | v1.2 bounds payload size in prose; the first reconstruction left it unbounded. |
+| `search_tsv` as `GENERATED ALWAYS AS (to_tsvector('english', content)) STORED` | The column was declared and indexed but never populated — the index could not match anything. |
+| Server-side `events_prepare_hash()` | Moves canonicalisation off the application, where every writer had to agree on it independently. |
+| `events_reject_truncate` | `TRUNCATE` bypasses row-level triggers, so append-only was enforceable only against `UPDATE`/`DELETE`. |
+
+Each was reimplemented rather than copied, so that defects 1–3 are not carried
+across: the hash trigger uses the builtin `pg_catalog.sha256(bytea)` — no
+extension, hardening preserved — and orders the chain head by the `bigserial`
+`sequence` under an advisory lock rather than by timestamp.
+
+The candidate's level-4 tool comment was checked against this schema and
+required no change: both files enforce the same rule (risk ≥ 3 requires
+approval), and the comment warns against a table-level ban on *active* level-4
+tools that this schema never imposed.
 
 ## Safety and rollback
 

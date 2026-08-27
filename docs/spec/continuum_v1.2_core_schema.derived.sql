@@ -26,6 +26,14 @@ CREATE SCHEMA IF NOT EXISTS continuum;               -- [V12]
 CREATE EXTENSION IF NOT EXISTS vector;               -- [V12]
 CREATE EXTENSION IF NOT EXISTS citext;               -- [DECISION] case-insensitive email
 
+-- [V12] "Large content exceeding 256 KiB SHOULD NOT live inside JSONB. It
+-- becomes an S3 artifact and is referenced by UUID and SHA-256." Encoding that
+-- as a domain makes the rule structural instead of advisory: an oversized
+-- payload is rejected at write time rather than discovered later.
+-- [DERIVED] encoding; the rule is v1.2, the domain is not.
+CREATE DOMAIN continuum.jsonb_256k AS jsonb
+    CHECK (VALUE IS NULL OR octet_length(VALUE::text) <= 262144);
+
 -- [V12] the application role MUST NOT have BYPASSRLS. Creation alone is not
 -- sufficient: if infrastructure provisioned the role earlier, or it was altered
 -- since, a CREATE-if-absent block silently leaves BYPASSRLS in place while the
@@ -228,7 +236,7 @@ CREATE TABLE continuum.evidence (
     valid_until         timestamptz,                                  -- [V11]
     trust_score         double precision NOT NULL                     -- [V11] ge=0 le=1
         CHECK (trust_score BETWEEN 0 AND 1),
-    payload             jsonb NOT NULL DEFAULT '{}'::jsonb,           -- [V11]
+    payload             continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V11 shape] [DERIVED bound]
     payload_artifact_id uuid,                                         -- [V12] >256 KiB to S3
     trace_id            char(32),                                     -- [V11]
     created_at          timestamptz NOT NULL DEFAULT now(),            -- [V11]
@@ -299,7 +307,11 @@ CREATE TABLE continuum.memories (
     salience            double precision CHECK (salience BETWEEN 0 AND 1),  -- [V12]
     utility             double precision CHECK (utility BETWEEN 0 AND 1),   -- [V12]
     source_run_id       uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [DERIVED]
-    search_tsv          tsvector,                                     -- [V12] FTS named
+    -- [DERIVED] generated, not plain. As a bare column this was declared and
+    -- indexed but never populated by anything, so the v1.2 lexical-retrieval
+    -- half of hybrid search would have matched nothing.
+    search_tsv          tsvector GENERATED ALWAYS AS
+                            (to_tsvector('english', content)) STORED,
     trace_id            char(32),                                     -- [V11]
     created_at          timestamptz NOT NULL DEFAULT now(),            -- [V11]
     -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
@@ -586,7 +598,7 @@ CREATE TABLE continuum.artifacts (
     producer_component  text NOT NULL,                                -- [V12]
     producer_version    text NOT NULL,                                -- [V12]
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                 -- [V12]
-    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb,           -- [V12]
+    metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V12] [DERIVED bound]
     created_at          timestamptz NOT NULL DEFAULT now()            -- [V12] required
 );
 
@@ -642,10 +654,20 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
     trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
-    payload             jsonb NOT NULL,                               -- [V12 name] [V11 shape]
+    payload             continuum.jsonb_256k NOT NULL,                               -- [V12 name] [V11 shape] [DERIVED bound]
     payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
     previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
+    -- NOT NULL is retained: BEFORE ROW triggers fire before constraints are
+    -- checked, so the trigger always populates this, and the constraint still
+    -- catches the case where the trigger is ever dropped.
     event_hash          char(64) NOT NULL,                            -- [V12 name] [DERIVED shape]
+    -- [DECISION: ADR-0002] Identifies which canonicalisation produced
+    -- event_hash. Set by the hash trigger, never defaulted, and itself part of
+    -- the hashed form. Without it the byte layout is a one-way door: any later
+    -- change would invalidate every chain ever written. With it, a verifier
+    -- selects the layout the row was written under, so a future layout can be
+    -- introduced for new events while old events still verify.
+    hash_version        smallint NOT NULL,                            -- [DECISION: ADR-0002]
     occurred_at         timestamptz NOT NULL,                         -- [V12 name] [DERIVED shape]
     ingested_at         timestamptz NOT NULL DEFAULT now()            -- [V12 name] [DERIVED shape]
 );
@@ -653,6 +675,139 @@ CREATE TABLE continuum.events (
 CREATE INDEX events_run_idx ON continuum.events (run_id, sequence);   -- [V11]
 CREATE INDEX events_aggregate_idx
     ON continuum.events (workspace_id, aggregate_type, aggregate_id, sequence);  -- [DERIVED]
+
+-- [DERIVED] Chain-head lookup. events_aggregate_idx cannot serve
+-- `WHERE workspace_id = ? ORDER BY sequence DESC LIMIT 1` because
+-- aggregate_type and aggregate_id sit between the two columns that matter, so
+-- without this index an insert for a quiet workspace walks the global sequence
+-- index back through unrelated history.
+CREATE INDEX events_workspace_sequence_idx
+    ON continuum.events (workspace_id, sequence DESC);
+
+-- [DERIVED] The bigserial default is evaluated while the tuple is built, which
+-- is BEFORE this table's BEFORE INSERT trigger runs and therefore outside the
+-- per-workspace advisory lock. Two concurrent inserts could take sequence 1 and
+-- 2, commit in the order 2 then 1, and leave sequence 1 chained to sequence 2 --
+-- a chain that reads as broken when verified in sequence order. Dropping the
+-- default moves allocation into the trigger, inside the lock, so the ordering
+-- value and the chain head are decided in one critical section. The sequence
+-- object itself is retained and still owned by the column.
+ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
+
+-- [DERIVED] Server-side hash chain. v1.2 states that the previous_hash/
+-- event_hash chain "allows Continuum to detect silent modification of audit
+-- history" and requires a continuum_event_hash_failures_total metric, but does
+-- not give the canonicalisation. Computing it in the database rather than the
+-- application means no caller can write an event whose hash does not match its
+-- own contents.
+--
+-- Five deliberate choices. The first two were learned from probing an
+-- alternative implementation against PostgreSQL 18; the last two from review of
+-- this implementation:
+--
+--   1. sha256() rather than pgcrypto's digest(). This function is SECURITY
+--      DEFINER with a hardened search_path that excludes public; pgcrypto
+--      installs digest() into public, so the two are mutually exclusive and
+--      every insert fails. The builtin sha256(bytea) lives in pg_catalog, needs
+--      no extension, and keeps the hardening intact.
+--
+--   2. The chain head is selected by `sequence`, the bigserial, not by
+--      ingested_at. ingested_at defaults to now() -- the TRANSACTION timestamp
+--      -- so every event written in one transaction ties, and ordering would
+--      fall back to a random uuid. A tamper-evident ledger whose order is not
+--      reconstructible is not doing its job.
+--
+--   3. `sequence` is allocated inside this function rather than by a column
+--      default, and is itself hashed. Allocating it here puts it under the same
+--      advisory lock as the chain-head read, so two concurrent writers cannot
+--      interleave into a backward link; hashing it binds the ordering into the
+--      chain, so events cannot be silently reordered afterwards either.
+--
+--   4. hash_version is written by this function and covered by the hash. The
+--      canonical layout is otherwise a one-way door -- changing it after the
+--      first event invalidates every chain. Recording the version per row makes
+--      a future layout additive: new events are written under version 2 while
+--      existing events still verify under version 1. Covering it by the hash
+--      stops an attacker flipping the column to make a verifier apply the wrong
+--      layout. See ADR-0002.
+--
+--   5. occurred_at is rendered as explicit UTC text. jsonb_build_object
+--      serialises a timestamptz through the session TimeZone, so two writers
+--      with different settings would hash the same instant differently and no
+--      verifier could reproduce either hash from the stored row.
+--
+-- The canonical byte layout is fixed by ADR-0002 as version 1. It is no longer
+-- a one-way door: hash_version records which layout each row was written under,
+-- so a version 2 can be introduced without invalidating existing chains.
+CREATE OR REPLACE FUNCTION continuum.events_prepare_hash()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, continuum
+AS $$
+DECLARE
+    head_hash char(64);
+    canonical jsonb;
+BEGIN
+    PERFORM pg_advisory_xact_lock(hashtextextended(NEW.workspace_id::text, 0));
+
+    -- Allocated here, not by a column default, so that the ordering value and
+    -- the chain head below are chosen inside the same critical section.
+    NEW.sequence := nextval('continuum.events_sequence_seq');
+
+    SELECT e.event_hash INTO head_hash
+      FROM continuum.events e
+     WHERE e.workspace_id = NEW.workspace_id
+     ORDER BY e.sequence DESC
+     LIMIT 1;
+
+    IF NEW.previous_hash IS NOT NULL
+       AND NEW.previous_hash IS DISTINCT FROM head_hash THEN
+        RAISE EXCEPTION 'previous_hash does not match the workspace chain head'
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    NEW.previous_hash := head_hash;
+
+    -- Written by the code that computes the hash, so the two can never
+    -- disagree. Bump this constant and branch below to introduce a layout 2.
+    NEW.hash_version := 1;
+
+    canonical := jsonb_build_object(
+        'hash_version',       NEW.hash_version,
+        'sequence',           NEW.sequence,
+        'event_id',           NEW.event_id,
+        'workspace_id',       NEW.workspace_id,
+        'run_id',             NEW.run_id,
+        'event_type',         NEW.event_type,
+        'schema_version',     NEW.schema_version,
+        'aggregate_type',     NEW.aggregate_type,
+        'aggregate_id',       NEW.aggregate_id,
+        'causation_event_id', NEW.causation_event_id,
+        'correlation_id',     NEW.correlation_id,
+        'actor_type',         NEW.actor_type,
+        'actor_id',           NEW.actor_id,
+        'trace_id',           NEW.trace_id,
+        'payload',            NEW.payload,
+        'payload_artifact_id', NEW.payload_artifact_id,
+        'previous_hash',      NEW.previous_hash,
+        -- Rendered explicitly in UTC. jsonb_build_object would serialise a
+        -- timestamptz through the *session* TimeZone, so the same instant would
+        -- hash differently for two writers, and a later verifier could not
+        -- reproduce the hash from the stored row.
+        'occurred_at',
+            to_char(NEW.occurred_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    );
+
+    NEW.event_hash := encode(sha256(convert_to(canonical::text, 'UTF8')), 'hex');
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER events_prepare_hash
+    BEFORE INSERT ON continuum.events
+    FOR EACH ROW EXECUTE FUNCTION continuum.events_prepare_hash();
 
 -- [V12] append-only for application roles; [DERIVED] enforcement mechanism
 CREATE OR REPLACE FUNCTION continuum.events_reject_mutation()
@@ -666,6 +821,12 @@ CREATE TRIGGER events_append_only
     BEFORE UPDATE OR DELETE ON continuum.events
     FOR EACH ROW EXECUTE FUNCTION continuum.events_reject_mutation();
 
+-- [DERIVED] TRUNCATE bypasses row-level triggers entirely, so an append-only
+-- guarantee built only from BEFORE UPDATE OR DELETE has a hole in it.
+CREATE TRIGGER events_reject_truncate
+    BEFORE TRUNCATE ON continuum.events
+    FOR EACH STATEMENT EXECUTE FUNCTION continuum.events_reject_mutation();
+
 REVOKE UPDATE, DELETE, TRUNCATE ON continuum.events FROM continuum_app;
 GRANT INSERT, SELECT ON continuum.events TO continuum_app;
 -- [DERIVED] table INSERT alone does not permit evaluating the bigserial default;
@@ -675,6 +836,13 @@ GRANT USAGE ON SEQUENCE continuum.events_sequence_seq TO continuum_app;
 -- ---------------------------------------------------------------------------
 -- 16. Row Level Security                                               [V12]
 -- ---------------------------------------------------------------------------
+--
+-- [DERIVED] Each predicate calls the helper through a scalar subquery,
+-- `(SELECT continuum.current_workspace_id())`, rather than calling it
+-- directly. The function is STABLE, but a STABLE function written directly
+-- into a policy qual is still re-evaluated per row; wrapping it makes the
+-- planner hoist it into a one-time InitPlan. Same semantics, one call per
+-- query instead of one per row scanned.
 
 DO $$
 DECLARE
@@ -692,8 +860,8 @@ BEGIN
         EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I '
-            'USING (workspace_id = continuum.current_workspace_id()) '
-            'WITH CHECK (workspace_id = continuum.current_workspace_id())',
+            'USING (workspace_id = (SELECT continuum.current_workspace_id())) '
+            'WITH CHECK (workspace_id = (SELECT continuum.current_workspace_id()))',
             t || '_tenant_isolation', t);
     END LOOP;
 END
@@ -712,12 +880,12 @@ BEGIN
         EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I FOR SELECT '
-            'USING (workspace_id = continuum.current_workspace_id() '
+            'USING (workspace_id = (SELECT continuum.current_workspace_id()) '
             '       OR workspace_id IS NULL)', t || '_read', t);
         EXECUTE format(
             'CREATE POLICY %I ON continuum.%I FOR ALL '
-            'USING (workspace_id = continuum.current_workspace_id()) '
-            'WITH CHECK (workspace_id = continuum.current_workspace_id())',
+            'USING (workspace_id = (SELECT continuum.current_workspace_id())) '
+            'WITH CHECK (workspace_id = (SELECT continuum.current_workspace_id()))',
             t || '_write', t);
     END LOOP;
 END
@@ -728,11 +896,45 @@ $$;
 ALTER TABLE continuum.workspaces ENABLE ROW LEVEL SECURITY;
 ALTER TABLE continuum.workspaces FORCE  ROW LEVEL SECURITY;
 CREATE POLICY workspaces_tenant_isolation ON continuum.workspaces
-    USING (id = continuum.current_workspace_id())
-    WITH CHECK (id = continuum.current_workspace_id());
+    USING (id = (SELECT continuum.current_workspace_id()))
+    WITH CHECK (id = (SELECT continuum.current_workspace_id()));
 
 -- [DECISION] users and models are not workspace-scoped; governed by grants.
 REVOKE ALL ON SCHEMA continuum FROM PUBLIC;
 GRANT USAGE ON SCHEMA continuum TO continuum_app;
+
+-- [DERIVED] Table privileges for the application role. Row Level Security
+-- constrains WHICH rows a role may touch; it does not grant the privilege to
+-- touch any. Without these grants continuum_app could not read or write 24 of
+-- the 25 tables, every tenant policy below would be unreachable, and no test
+-- that runs as a superuser would notice -- superusers bypass RLS entirely,
+-- FORCE included, so the predicates are never evaluated.
+--
+-- [DECISION] No DELETE is granted anywhere. v1.2 supersedes rather than
+-- deletes (`superseded_by` on claims and memories, promotion stages on
+-- mutations), so least privilege is the safer default for a security boundary
+-- until an ADR establishes a hard-delete path. workspaces, users and models are
+-- read-only to the application: creating a tenant or registering a model is an
+-- administrative act.
+DO $$
+DECLARE
+    t text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
+        'workspace_members','runs','artifacts','agents','agent_versions',
+        'model_metrics','evidence','claims','claim_evidence','memories',
+        'memory_embeddings','memory_edges','failures','tools','tool_versions',
+        'tool_executions','evaluations','evaluation_results','mutations',
+        'mutation_evaluations','cost_events'
+    ] LOOP
+        EXECUTE format(
+            'GRANT SELECT, INSERT, UPDATE ON continuum.%I TO continuum_app', t);
+    END LOOP;
+
+    FOREACH t IN ARRAY ARRAY['workspaces','users','models'] LOOP
+        EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_app', t);
+    END LOOP;
+END
+$$;
 GRANT USAGE, CREATE ON SCHEMA continuum TO continuum_migration;
 GRANT USAGE ON SCHEMA continuum TO continuum_maintenance;

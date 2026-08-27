@@ -290,8 +290,8 @@ CREATE TABLE continuum.evidence (
     valid_until   timestamptz,                                       -- [V11] Evidence.valid_until
     trust_score   double precision NOT NULL                          -- [V11] Evidence.trust_score, ge=0 le=1
         CHECK (trust_score BETWEEN 0 AND 1),
-    payload       jsonb NOT NULL DEFAULT '{}'::jsonb,                -- [V11] Evidence.payload
-    payload_artifact_id uuid,                                        -- [V12] >256 KiB offloads to S3
+    payload       continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb, -- [V11] Evidence.payload, [DERIVED] bound
+    payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     trace_id      char(32),                                          -- [V11] universal column rule
     created_at    timestamptz NOT NULL DEFAULT now()                 -- [V11]
 );
@@ -618,7 +618,7 @@ CREATE TABLE continuum.artifacts (
     producer_component  text NOT NULL,                               -- [V12] producer.component
     producer_version    text NOT NULL,                               -- [V12] producer.version
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                -- [V12]
-    metadata            jsonb NOT NULL DEFAULT '{}'::jsonb,          -- [V12]
+    metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,  -- [V12], [DERIVED] bound
     created_at          timestamptz NOT NULL DEFAULT now()           -- [V12] required
 );
 
@@ -677,10 +677,11 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                               -- [V12] field
     actor_id            uuid,                                        -- [V12] field
     trace_id            char(32),                                    -- [V12] field
-    payload             jsonb NOT NULL,                              -- [V12] field, [V11] JSONB NOT NULL
-    payload_artifact_id uuid,                                        -- [V12] >256 KiB offloads to S3
+    payload             continuum.jsonb_256k NOT NULL,               -- [V12] field, [V11] JSONB NOT NULL, [DERIVED] bound
+    payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     previous_hash       char(64),                                    -- [V12] field
     event_hash          char(64) NOT NULL,                           -- [V12] field
+    hash_version        smallint NOT NULL,                           -- [DECISION: ADR-0002]
     occurred_at         timestamptz NOT NULL,                        -- [V12] field
     ingested_at         timestamptz NOT NULL DEFAULT now()           -- [V12] field
 );
@@ -689,6 +690,16 @@ CREATE INDEX events_run_idx
     ON continuum.events (run_id, sequence);                          -- [V11] run_events_run_idx
 CREATE INDEX events_aggregate_idx
     ON continuum.events (workspace_id, aggregate_type, aggregate_id, sequence);  -- [DERIVED]
+
+-- [DERIVED] Serves the chain-head lookup in section 4.2. events_aggregate_idx
+-- cannot: aggregate_type and aggregate_id sit between workspace_id and
+-- sequence, so it cannot order by sequence within a workspace.
+CREATE INDEX events_workspace_sequence_idx
+    ON continuum.events (workspace_id, sequence DESC);
+
+-- [DERIVED] See section 4.2: the ordering value is allocated by the hash
+-- trigger, under the per-workspace advisory lock, not by this default.
+ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
 ```
 
 ### 4.1 Append-only enforcement
@@ -720,22 +731,76 @@ v1.2 states the chain detects silent modification of audit history, and requires
 **must be fixed by ADR before any event is written**, since changing it later
 invalidates every existing chain.
 
+**Fixed by ADR-0002 as layout version 1.** `events.hash_version` records the
+layout each event was written under, so this is revisable: a version 2 would
+apply to new events while events already written continue to verify under
+version 1.
+
+The canonicalisation below is **normative and is the one the schema executes**
+(`continuum.events_prepare_hash()` in
+`continuum_v1.2_core_schema.derived.sql`). A verifier written from this section
+must reproduce the hashes the database computes, so the two are stated once and
+kept identical; if they ever diverge, the SQL is authoritative and this section
+is the defect. `[DERIVED]`
+
 ```text
-event_hash = sha256(
-    previous_hash || 0x1F ||
-    event_id      || 0x1F ||
-    workspace_id  || 0x1F ||
-    event_type    || 0x1F ||
-    schema_version|| 0x1F ||
-    aggregate_type|| 0x1F ||
-    aggregate_id  || 0x1F ||
-    occurred_at   || 0x1F ||     -- RFC 3339, UTC, microsecond precision
-    sha256(payload_canonical_json)
+canonical  = jsonb_build_object(     -- key order as written; jsonb sorts keys
+    'hash_version',        hash_version,      -- 1
+    'sequence',            sequence,
+    'event_id',            event_id,
+    'workspace_id',        workspace_id,
+    'run_id',              run_id,
+    'event_type',          event_type,
+    'schema_version',      schema_version,
+    'aggregate_type',      aggregate_type,
+    'aggregate_id',        aggregate_id,
+    'causation_event_id',  causation_event_id,
+    'correlation_id',      correlation_id,
+    'actor_type',          actor_type,
+    'actor_id',            actor_id,
+    'trace_id',            trace_id,
+    'payload',             payload,
+    'payload_artifact_id', payload_artifact_id,
+    'previous_hash',       previous_hash,
+    'occurred_at',         to_char(occurred_at AT TIME ZONE 'UTC',
+                                   'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
 )
+
+event_hash = encode(sha256(convert_to(canonical::text, 'UTF8')), 'hex')
 ```
 
+Four properties of this layout are load-bearing, and each exists because its
+absence was a defect:
+
+- **`jsonb`, not delimiter concatenation.** `jsonb` normalises key order and
+  whitespace on storage, so `canonical::text` is a deterministic function of the
+  values. A `||` concatenation with a separator byte is only unambiguous if no
+  field can contain that byte, which `payload` can.
+- **`occurred_at` is rendered as explicit UTC text.** Passing the `timestamptz`
+  directly would serialise it through the writing session's `TimeZone`, so the
+  same instant would hash differently for two writers and no verifier could
+  reproduce either hash from the stored row.
+- **`payload_artifact_id` is included.** When a payload exceeds 256 KiB it is
+  offloaded and this UUID is the only link to the content. Omitting it would let
+  the reference be repointed at a different artifact with `event_hash` and every
+  later link still valid — exactly the silent modification of audit history the
+  chain exists to detect.
+- **`sequence` is included.** It binds each event to its position, so the chain
+  detects reordering and not merely edits.
+- **`hash_version` is included.** Covering the version by the hash stops the
+  column being flipped to make a verifier apply the wrong layout to a row.
+
 `previous_hash` is the `event_hash` of the preceding event in the same
-`workspace_id` chain, or 64 zero characters for the genesis event. `[DERIVED]`
+`workspace_id` chain, ordered by `sequence`, and **SQL `NULL` for the genesis
+event** — not a string of zeroes. A caller may supply `previous_hash`, in which
+case it must equal the current chain head or the insert is rejected; leaving it
+unset is the normal path and the trigger fills it in. `[DERIVED]`
+
+`sequence` is allocated by the trigger while it holds the per-workspace advisory
+lock, not by the column's `bigserial` default. A default is evaluated before the
+`BEFORE INSERT` trigger fires and therefore outside that lock, which lets two
+concurrent writers take positions 1 and 2, commit in the order 2 then 1, and
+leave position 1 chained to position 2. `[DERIVED]`
 
 ---
 
@@ -952,9 +1017,13 @@ Constraints these must satisfy, all `[V12]`:
 
 **Ordered by consequence:**
 
-1. **Event hash canonicalisation** (§4.2) — highest priority. Changing this
-   after any event is written invalidates every existing chain, so it must be
-   fixed before the event store takes its first write.
+1. ~~**Event hash canonicalisation** (§4.2)~~ — **RESOLVED by ADR-0002.**
+   Version 1 is the layout §4.2 documents and the schema executes. The decision
+   is also no longer irreversible: `events.hash_version` records the layout each
+   row was written under, so a future layout applies to new events while
+   existing chains still verify. This was the highest-consequence item on the
+   list; what made it urgent was not the layout but the fact that it could never
+   be changed.
 2. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
 3. **Language dependency versions** (§6.2) — deliberately unpinned here.
 4. **`users` / `models` exemption from RLS** (§5).

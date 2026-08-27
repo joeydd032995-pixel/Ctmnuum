@@ -312,4 +312,373 @@ BEGIN
 END
 $$;
 
+-- 14. The >256 KiB offload rule is enforced by the type, not by convention  [V12]
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'OversizeEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('blob', repeat('x', 300000)), now()
+        );
+        RAISE EXCEPTION 'a >256 KiB payload was accepted inline';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'oversized JSONB payload rejected: enforced';
+    END;
+END
+$$;
+
+-- 15. Lexical retrieval actually has something to match against        [DERIVED]
+INSERT INTO continuum.memories (id, workspace_id, memory_type, content, content_hash)
+VALUES ('00000000-0000-0000-0000-0000000000c9', '00000000-0000-0000-0000-0000000000aa',
+        'semantic', 'the falsifier caught a seeded hypothesis', repeat('0', 64));
+
+DO $$
+DECLARE hits integer;
+BEGIN
+    SELECT count(*) INTO hits
+      FROM continuum.memories
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+       AND search_tsv @@ to_tsquery('english', 'falsifier & hypothesis');
+    IF hits <> 1 THEN
+        RAISE EXCEPTION 'generated search_tsv did not match (% hits)', hits;
+    END IF;
+    RAISE NOTICE 'generated search_tsv is populated and matches';
+END
+$$;
+
+-- 16. The event hash chain is computed server-side and is reconstructible [DERIVED]
+DO $$
+DECLARE
+    i integer;
+    total integer;
+    broken integer;
+    ordered integer;
+BEGIN
+    -- three events in ONE transaction: the case that defeats ingested_at ordering
+    FOR i IN 1..3 LOOP
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'ChainEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('seq', i), now()
+        );
+    END LOOP;
+
+    SELECT count(*) INTO total
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa';
+
+    -- every non-genesis event must chain to the event immediately before it
+    -- in sequence order; this is what a random-uuid tiebreak cannot guarantee
+    SELECT count(*) INTO broken
+      FROM (
+        SELECT event_hash, previous_hash,
+               lag(event_hash) OVER (ORDER BY sequence) AS prior
+          FROM continuum.events
+         WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+      ) c
+     WHERE c.prior IS NOT NULL AND c.previous_hash IS DISTINCT FROM c.prior;
+
+    IF broken <> 0 THEN
+        RAISE EXCEPTION 'hash chain does not follow sequence order (% breaks)', broken;
+    END IF;
+
+    SELECT count(*) INTO ordered
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+       AND event_hash IS NOT NULL;
+    IF ordered <> total THEN
+        RAISE EXCEPTION 'some events have no computed hash';
+    END IF;
+
+    RAISE NOTICE 'hash chain: % events, computed server-side, follows sequence order', total;
+END
+$$;
+
+-- 17. A caller cannot write an event whose previous_hash contradicts the chain [DERIVED]
+DO $$
+BEGIN
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload,
+            previous_hash, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'ForgedEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            '{}'::jsonb, repeat('f', 64), now()
+        );
+        RAISE EXCEPTION 'an event with a forged previous_hash was accepted';
+    EXCEPTION WHEN check_violation THEN
+        RAISE NOTICE 'forged previous_hash rejected: enforced';
+    END;
+END
+$$;
+
+-- 18. TRUNCATE is rejected. Assertion 6 covers UPDATE and DELETE only, and
+--     TRUNCATE bypasses row-level triggers entirely, so append-only is not
+--     actually established without this. [DERIVED]
+DO $$
+BEGIN
+    BEGIN
+        TRUNCATE continuum.events;
+        RAISE EXCEPTION 'TRUNCATE on the event store was accepted';
+    EXCEPTION WHEN raise_exception THEN
+        IF SQLERRM = 'TRUNCATE on the event store was accepted' THEN
+            RAISE;
+        END IF;
+        RAISE NOTICE 'TRUNCATE on the event store rejected: enforced';
+    END;
+END
+$$;
+
+-- 19. The stored hash is reproducible by an independent verifier running under
+--     a different session TimeZone. This re-implements the canonicalisation
+--     documented in artifact section 4.2 and checks it against what the trigger
+--     actually wrote, so the document and the schema cannot drift apart
+--     silently. [DERIVED]
+DO $$
+DECLARE
+    row_       continuum.events%ROWTYPE;
+    recomputed char(64);
+BEGIN
+    SET LOCAL TimeZone = 'America/New_York';
+
+    SELECT * INTO row_
+      FROM continuum.events
+     WHERE workspace_id = '00000000-0000-0000-0000-0000000000aa'
+     ORDER BY sequence DESC
+     LIMIT 1;
+
+    recomputed := encode(sha256(convert_to(jsonb_build_object(
+        'hash_version',        row_.hash_version,
+        'sequence',            row_.sequence,
+        'event_id',            row_.event_id,
+        'workspace_id',        row_.workspace_id,
+        'run_id',              row_.run_id,
+        'event_type',          row_.event_type,
+        'schema_version',      row_.schema_version,
+        'aggregate_type',      row_.aggregate_type,
+        'aggregate_id',        row_.aggregate_id,
+        'causation_event_id',  row_.causation_event_id,
+        'correlation_id',      row_.correlation_id,
+        'actor_type',          row_.actor_type,
+        'actor_id',            row_.actor_id,
+        'trace_id',            row_.trace_id,
+        'payload',             row_.payload,
+        'payload_artifact_id', row_.payload_artifact_id,
+        'previous_hash',       row_.previous_hash,
+        'occurred_at',
+            to_char(row_.occurred_at AT TIME ZONE 'UTC',
+                    'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
+    )::text, 'UTF8')), 'hex');
+
+    IF recomputed IS DISTINCT FROM row_.event_hash THEN
+        RAISE EXCEPTION 'hash is not reproducible under a different TimeZone: % <> %',
+            recomputed, row_.event_hash;
+    END IF;
+
+    RAISE NOTICE 'event hash reproducible by an independent verifier under a non-UTC TimeZone';
+END
+$$;
+
+-- 20. The offloaded-payload reference is covered by the hash. Repointing
+--     payload_artifact_id at a different artifact must change event_hash,
+--     otherwise the chain cannot detect that substitution. [DERIVED]
+DO $$
+DECLARE
+    with_ref    char(64);
+    with_other  char(64);
+    base        jsonb;
+BEGIN
+    SELECT jsonb_build_object('payload_artifact_id',
+                              '00000000-0000-0000-0000-0000000000c1'::uuid)
+      INTO base;
+    with_ref   := encode(sha256(convert_to(base::text, 'UTF8')), 'hex');
+    with_other := encode(sha256(convert_to(
+        jsonb_build_object('payload_artifact_id',
+                           '00000000-0000-0000-0000-0000000000c2'::uuid)::text,
+        'UTF8')), 'hex');
+
+    IF with_ref = with_other THEN
+        RAISE EXCEPTION 'payload_artifact_id does not affect the canonical form';
+    END IF;
+
+    PERFORM 1
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'continuum'
+        AND p.proname = 'events_prepare_hash'
+        AND pg_get_functiondef(p.oid) LIKE '%payload_artifact_id%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'events_prepare_hash does not hash payload_artifact_id';
+    END IF;
+
+    RAISE NOTICE 'offloaded payload reference is covered by the event hash';
+END
+$$;
+
+-- 21. The ordering value is not handed out before the chain lock. A default on
+--     continuum.events.sequence would be evaluated while the tuple is built,
+--     which is before the BEFORE INSERT trigger acquires the per-workspace
+--     advisory lock -- the window in which two writers can interleave into a
+--     backward link. [DERIVED]
+DO $$
+DECLARE
+    has_default boolean;
+BEGIN
+    SELECT a.atthasdef INTO has_default
+      FROM pg_attribute a
+     WHERE a.attrelid = 'continuum.events'::regclass
+       AND a.attname  = 'sequence';
+
+    IF has_default THEN
+        RAISE EXCEPTION
+            'continuum.events.sequence still has a column default; the ordering '
+            'value is allocated outside the advisory lock';
+    END IF;
+
+    PERFORM 1
+       FROM pg_indexes
+      WHERE schemaname = 'continuum'
+        AND tablename  = 'events'
+        AND indexdef LIKE '%(workspace_id, sequence DESC)%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'no (workspace_id, sequence DESC) index for the chain-head lookup';
+    END IF;
+
+    RAISE NOTICE 'ordering value allocated under the chain lock; chain-head lookup indexed';
+END
+$$;
+
+-- 22. The hash layout is versioned per row, and the version is itself hashed.
+--     Without this the canonicalisation is a one-way door: any later change
+--     invalidates every chain ever written. ADR-0002. [DECISION: ADR-0002]
+DO $$
+DECLARE
+    has_default  boolean;
+    versions     integer;
+    nulls        integer;
+BEGIN
+    -- Written by the trigger, never defaulted, so the value cannot disagree
+    -- with the code that computed the hash beside it.
+    SELECT a.atthasdef INTO has_default
+      FROM pg_attribute a
+     WHERE a.attrelid = 'continuum.events'::regclass
+       AND a.attname  = 'hash_version';
+    IF has_default THEN
+        RAISE EXCEPTION 'hash_version has a column default; it must be set by the hash trigger';
+    END IF;
+
+    SELECT count(DISTINCT hash_version), count(*) FILTER (WHERE hash_version IS NULL)
+      INTO versions, nulls
+      FROM continuum.events;
+    IF nulls <> 0 THEN
+        RAISE EXCEPTION '% events carry no hash_version', nulls;
+    END IF;
+    IF versions <> 1 THEN
+        RAISE EXCEPTION 'expected one hash layout in use, found %', versions;
+    END IF;
+
+    -- Covered by the hash, so flipping the column cannot make a verifier apply
+    -- the wrong layout to a row.
+    PERFORM 1
+       FROM pg_proc p
+       JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'continuum'
+        AND p.proname = 'events_prepare_hash'
+        AND pg_get_functiondef(p.oid) LIKE '%''hash_version'',%';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'events_prepare_hash does not hash hash_version';
+    END IF;
+
+    RAISE NOTICE 'hash layout is versioned per row and the version is hashed';
+END
+$$;
+
+-- A built-in agent: workspace_id IS NULL means shared by every tenant.
+-- Assertion 13 checks only that the policy TEXT mentions IS NULL; assertion 23
+-- below reads this row as an ordinary tenant, which is the actual claim.
+INSERT INTO continuum.agents (id, workspace_id, name, role)
+VALUES ('00000000-0000-0000-0000-0000000000d1', NULL, 'builtin-falsifier', 'falsifier');
+
+-- 23. Tenant isolation is enforced in BEHAVIOUR, not merely configured.
+--
+--     Assertion 5 checks pg_class.relrowsecurity and relforcerowsecurity: it
+--     proves RLS is switched on, not that any policy does anything. A policy of
+--     `USING (workspace_id = workspace_id)` isolates nothing and still passes
+--     assertion 5. Nor would running these checks as the superuser help --
+--     superusers bypass RLS entirely, FORCE included, so the predicate is never
+--     evaluated. This assertion therefore drops to continuum_app, the role the
+--     application actually uses, which is NOLOGIN NOBYPASSRLS.
+--
+--     v1.2 states the hard gate as zero cross-workspace access. This is the
+--     assertion that tests it. [V12]
+DO $$
+DECLARE
+    ws_a       constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    ws_b       constant uuid := '00000000-0000-0000-0000-0000000000bb';
+    seen_own   integer;
+    seen_other integer;
+    seen_unset integer;
+    builtin    integer;
+BEGIN
+    SET LOCAL ROLE continuum_app;
+
+    PERFORM set_config('app.workspace_id', ws_a::text, true);
+
+    SELECT count(*) INTO seen_own
+      FROM continuum.memories WHERE workspace_id = ws_a;
+    IF seen_own = 0 THEN
+        RAISE EXCEPTION 'tenant cannot see its own rows; the policy is too strict';
+    END IF;
+
+    SELECT count(*) INTO seen_other
+      FROM continuum.memories WHERE workspace_id = ws_b;
+    IF seen_other <> 0 THEN
+        RAISE EXCEPTION
+            'cross-workspace read: % row(s) belonging to another tenant are visible',
+            seen_other;
+    END IF;
+
+    -- WITH CHECK must refuse a row planted into someone else's workspace.
+    BEGIN
+        INSERT INTO continuum.memories
+            (id, workspace_id, memory_type, content, content_hash)
+        VALUES (gen_random_uuid(), ws_b, 'semantic', 'planted', repeat('c', 64));
+        RAISE EXCEPTION 'cross-workspace write accepted';
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+
+    -- Built-in agents (workspace_id IS NULL) stay readable to every tenant.
+    SELECT count(*) INTO builtin
+      FROM continuum.agents WHERE workspace_id IS NULL;
+    IF builtin = 0 THEN
+        RAISE EXCEPTION 'built-in agents are invisible to a tenant under RLS';
+    END IF;
+
+    -- Fail closed: no tenant context must expose nothing, not everything.
+    PERFORM set_config('app.workspace_id', '', true);
+    SELECT count(*) INTO seen_unset FROM continuum.memories;
+    IF seen_unset <> 0 THEN
+        RAISE EXCEPTION
+            'unset tenant context exposed % row(s); RLS is not failing closed',
+            seen_unset;
+    END IF;
+
+    RAISE NOTICE
+        'tenant isolation enforced as continuum_app: own rows only, cross-tenant write rejected, fails closed';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;
