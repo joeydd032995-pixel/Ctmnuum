@@ -739,26 +739,53 @@ BEGIN
 END
 $$;
 
--- 25. The audit log is not erasable, by anyone. ADR-0003 excludes events from
---     the maintenance DELETE grant precisely because the append-only trigger
---     would reject it anyway; a grant that cannot be exercised reads as
---     permission and is worse than none. [DERIVED]
+-- 25. Nothing maintenance must not erase is erasable -- by any route.
+--
+--     has_table_privilege, not role_table_grants: the latter lists only DIRECT
+--     grants, so a privilege inherited from another role or granted to PUBLIC
+--     would satisfy it while the role still holds the effective permission.
+--
+--     The excluded set is not arbitrary. events and workspaces would raise on
+--     the append-only trigger; runs would raise on events.run_id (NO ACTION);
+--     and agents, tools, evaluations and mutations each parent a child whose
+--     foreign key names the parent by id alone, so an ON DELETE CASCADE from
+--     them crosses the tenant boundary WITHOUT evaluating the child's RLS
+--     policy. [DERIVED]
 DO $$
 DECLARE
-    has_delete boolean;
+    t text;
+    leaked text[] := ARRAY[]::text[];
 BEGIN
-    SELECT bool_or(privilege_type = 'DELETE') INTO has_delete
-      FROM information_schema.role_table_grants
-     WHERE table_schema = 'continuum'
-       AND table_name IN ('events', 'workspaces')
-       AND grantee = 'continuum_maintenance';
-    IF coalesce(has_delete, false) THEN
+    FOREACH t IN ARRAY ARRAY[
+        'events','workspaces','runs','agents','tools','evaluations','mutations'
+    ] LOOP
+        IF has_table_privilege('continuum_maintenance', 'continuum.' || t, 'DELETE') THEN
+            leaked := leaked || t;
+        END IF;
+    END LOOP;
+
+    IF cardinality(leaked) > 0 THEN
         RAISE EXCEPTION
-            'continuum_maintenance holds DELETE on events or workspaces; the '
-            'append-only trigger would reject it, so the grant is a lie';
+            'continuum_maintenance holds effective DELETE on %; each would either '
+            'raise on a trigger or cascade across the tenant boundary', leaked;
     END IF;
 
-    RAISE NOTICE 'audit log and tenant root are excluded from the erasure grant';
+    -- The role must still be able to erase what it is for, or the grant is
+    -- decorative and assertion 24 is the only thing standing between this
+    -- schema and a purge that silently does nothing.
+    IF NOT has_table_privilege('continuum_maintenance', 'continuum.memories', 'DELETE') THEN
+        RAISE EXCEPTION 'continuum_maintenance cannot erase memories; erasure is not possible';
+    END IF;
+
+    -- users is global and carries email; a tenant-scoped job must not read it.
+    IF has_table_privilege('continuum_maintenance', 'continuum.users', 'SELECT') THEN
+        RAISE EXCEPTION
+            'continuum_maintenance can read continuum.users, which is not '
+            'workspace-scoped: a job scoped to one tenant would see every person';
+    END IF;
+
+    RAISE NOTICE
+        'erasure grant is confined: no cascade-unsafe or trigger-blocked table, no global user visibility';
 END
 $$;
 
