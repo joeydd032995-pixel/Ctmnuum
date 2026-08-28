@@ -910,31 +910,57 @@ GRANT USAGE ON SCHEMA continuum TO continuum_app;
 -- that runs as a superuser would notice -- superusers bypass RLS entirely,
 -- FORCE included, so the predicates are never evaluated.
 --
--- [DECISION] No DELETE is granted anywhere. v1.2 supersedes rather than
--- deletes (`superseded_by` on claims and memories, promotion stages on
--- mutations), so least privilege is the safer default for a security boundary
--- until an ADR establishes a hard-delete path. workspaces, users and models are
--- read-only to the application: creating a tenant or registering a model is an
--- administrative act.
+-- [DECISION: ADR-0003] The application role never deletes. v1.2 supersedes
+-- rather than deletes (`superseded_by` on claims and memories, promotion stages
+-- on mutations), so hard deletion is not part of normal application behaviour.
+-- Erasure and retention are a separate, auditable duty and belong to
+-- continuum_maintenance, which is the role the three-way split already exists
+-- to express. workspaces, users and models are read-only to the application:
+-- creating a tenant or registering a model is an administrative act.
+--
+-- continuum_maintenance is NOBYPASSRLS like every other role, so a purge runs
+-- *inside* a tenant context and the same policies apply to it. There is no
+-- cross-workspace sweep: erasure is per workspace, which is also the shape a
+-- right-to-erasure request actually takes.
 DO $$
 DECLARE
     t text;
-BEGIN
-    FOREACH t IN ARRAY ARRAY[
+    domain_tables constant text[] := ARRAY[
         'workspace_members','runs','artifacts','agents','agent_versions',
         'model_metrics','evidence','claims','claim_evidence','memories',
         'memory_embeddings','memory_edges','failures','tools','tool_versions',
         'tool_executions','evaluations','evaluation_results','mutations',
         'mutation_evaluations','cost_events'
-    ] LOOP
+    ];
+BEGIN
+    FOREACH t IN ARRAY domain_tables LOOP
         EXECUTE format(
             'GRANT SELECT, INSERT, UPDATE ON continuum.%I TO continuum_app', t);
+        -- SELECT as well as DELETE: a retention job has to find the rows before
+        -- it can remove them.
+        EXECUTE format(
+            'GRANT SELECT, DELETE ON continuum.%I TO continuum_maintenance', t);
     END LOOP;
 
     FOREACH t IN ARRAY ARRAY['workspaces','users','models'] LOOP
         EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_app', t);
+        EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_maintenance', t);
     END LOOP;
 END
 $$;
+
+-- [DERIVED] Two deliberate exclusions from the maintenance DELETE grant.
+--
+--   continuum.events is append-only. events_append_only rejects DELETE for
+--   every role, triggers included, so a grant here would be a privilege that
+--   cannot be exercised -- worse than none, because it reads as permission.
+--
+--   continuum.workspaces is excluded because deleting a workspace cascades into
+--   the event store, where the append-only trigger raises. Workspace teardown
+--   therefore cannot work by cascade and needs its own decision about what
+--   happens to the audit log. Granting DELETE here would only produce a failure
+--   at the moment someone tried it. Recorded as an open question in ADR-0003
+--   rather than papered over.
+REVOKE DELETE ON continuum.events, continuum.workspaces FROM continuum_maintenance;
 GRANT USAGE, CREATE ON SCHEMA continuum TO continuum_migration;
 GRANT USAGE ON SCHEMA continuum TO continuum_maintenance;

@@ -681,4 +681,85 @@ BEGIN
 END
 $$;
 
+-- 24. Erasure is a maintenance duty, and it is still tenant-scoped.
+--
+--     ADR-0003: the application role never hard-deletes; continuum_maintenance
+--     does, and is NOBYPASSRLS like every other role, so a purge runs inside a
+--     tenant context rather than sweeping across workspaces. A grant alone would
+--     not establish that -- this exercises all four halves of the claim.
+--     [DECISION: ADR-0003]
+DO $$
+DECLARE
+    ws_a constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    ws_b constant uuid := '00000000-0000-0000-0000-0000000000bb';
+    doomed uuid := gen_random_uuid();
+    survivor_b integer;
+    removed integer;
+BEGIN
+    INSERT INTO continuum.memories (id, workspace_id, memory_type, content, content_hash)
+    VALUES (doomed, ws_a, 'semantic', 'to be erased', repeat('e', 64));
+
+    -- 1. the application role must NOT be able to delete
+    SET LOCAL ROLE continuum_app;
+    PERFORM set_config('app.workspace_id', ws_a::text, true);
+    BEGIN
+        DELETE FROM continuum.memories WHERE id = doomed;
+        RAISE EXCEPTION 'continuum_app was able to hard-delete a row';
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    RESET ROLE;
+
+    -- 2. the maintenance role must be able to, within its tenant context
+    SET LOCAL ROLE continuum_maintenance;
+    PERFORM set_config('app.workspace_id', ws_a::text, true);
+    DELETE FROM continuum.memories WHERE id = doomed;
+    GET DIAGNOSTICS removed = ROW_COUNT;
+    IF removed <> 1 THEN
+        RAISE EXCEPTION 'continuum_maintenance could not erase a row in its own workspace';
+    END IF;
+
+    -- 3. and must NOT reach another workspace's rows: RLS still applies to it
+    DELETE FROM continuum.memories WHERE workspace_id = ws_b;
+    GET DIAGNOSTICS removed = ROW_COUNT;
+    IF removed <> 0 THEN
+        RAISE EXCEPTION
+            'continuum_maintenance deleted % row(s) from another workspace', removed;
+    END IF;
+    RESET ROLE;
+
+    SELECT count(*) INTO survivor_b
+      FROM continuum.memories WHERE workspace_id = ws_b;
+    IF survivor_b = 0 THEN
+        RAISE EXCEPTION 'tenant B rows did not survive a tenant A purge';
+    END IF;
+
+    RAISE NOTICE
+        'erasure is maintenance-only and tenant-scoped: app denied, maintenance erased 1 row in its own workspace, other tenant untouched';
+END
+$$;
+
+-- 25. The audit log is not erasable, by anyone. ADR-0003 excludes events from
+--     the maintenance DELETE grant precisely because the append-only trigger
+--     would reject it anyway; a grant that cannot be exercised reads as
+--     permission and is worse than none. [DERIVED]
+DO $$
+DECLARE
+    has_delete boolean;
+BEGIN
+    SELECT bool_or(privilege_type = 'DELETE') INTO has_delete
+      FROM information_schema.role_table_grants
+     WHERE table_schema = 'continuum'
+       AND table_name IN ('events', 'workspaces')
+       AND grantee = 'continuum_maintenance';
+    IF coalesce(has_delete, false) THEN
+        RAISE EXCEPTION
+            'continuum_maintenance holds DELETE on events or workspaces; the '
+            'append-only trigger would reject it, so the grant is a lie';
+    END IF;
+
+    RAISE NOTICE 'audit log and tenant root are excluded from the erasure grant';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;

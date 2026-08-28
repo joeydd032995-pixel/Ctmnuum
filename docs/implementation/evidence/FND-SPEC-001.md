@@ -119,13 +119,18 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     than as the superuser: own rows visible, another tenant's rows not, a
     cross-tenant write rejected, built-in agents readable, and no rows at all
     when the tenant context is unset.
+24. Erasure is maintenance-only and still tenant-scoped: the application role is
+    refused, `continuum_maintenance` erases within its own workspace, and cannot
+    reach another workspace's rows (ADR-0003).
+25. `continuum_maintenance` holds no `DELETE` on `events` or `workspaces` — a
+    grant the append-only trigger would reject reads as permission.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–23 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–25 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -143,7 +148,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–23
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–25
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -307,11 +312,15 @@ privilege to touch any. Every other tenant policy was therefore unreachable —
 and a superuser-only test could never notice, because a superuser needs no
 grant.
 
-Table privileges are now granted explicitly. `[DECISION]`: no `DELETE` is
-granted anywhere, because v1.2 supersedes rather than deletes (`superseded_by`
-on claims and memories, promotion stages on mutations), so least privilege is
-the safer default for a security boundary until an ADR establishes a hard-delete
-path. `workspaces`, `users` and `models` are read-only to the application.
+Table privileges are now granted explicitly. The `DELETE` question that PR #8
+left open is settled by **ADR-0003**: `continuum_maintenance` holds
+`SELECT, DELETE` on the 21 domain tables and `continuum_app` never holds
+`DELETE`, so erasure is a separate auditable duty rather than ordinary
+application behaviour. Because the maintenance role is `NOBYPASSRLS` like every
+other role, a purge runs inside a tenant context and cannot sweep across
+workspaces. `events` and `workspaces` are explicitly revoked: the append-only
+trigger would reject either, and a grant that cannot be exercised reads as
+permission.
 
 Assertion 23 fails with `permission denied for table memories` if the grants are
 removed.
