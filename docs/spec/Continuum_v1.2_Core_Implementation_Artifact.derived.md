@@ -849,6 +849,35 @@ than RLS. `[DECISION]`
 Because `continuum.current_workspace_id()` returns `NULL` when `app.workspace_id`
 is unset, every policy fails closed. `[V12]`
 
+### 4.3 Artifact retention
+
+v1.2 states the schedule directly, and reserves S3 Object Lock for the **audit
+bucket** alone, "only enabled after a specific retention/legal decision".
+Object Lock is therefore not the control that holds `immutable` and
+`legal_hold` artifacts — the manifest store is. `[V12]`
+
+| Class | Retention |
+|---|---|
+| `ephemeral` | 7 days |
+| `standard` | 90 days |
+| `durable` | 365 days |
+| `immutable` | policy-defined — no timer |
+| `legal_hold` | policy-defined — no timer |
+
+**Fixed by ADR-0005.** `[DECISION: ADR-0005]` The store applies the schedule
+(`artifacts_apply_retention` derives `delete_after` from `created_at`), refuses
+to weaken a class (`artifacts_retention_no_weakening` — otherwise a hold is
+advisory, since relabelling `legal_hold` to `ephemeral` would achieve deletion
+in seven days), requires held classes to carry no expiry, and answers
+eligibility itself through `continuum.artifacts_due_for_expiry`, which
+structurally cannot return a hold.
+
+Deletion means the **object**; the manifest row stays, with `content_deleted_at`
+recording that the content went. That column is store-side only: the v1.2
+manifest sets `additionalProperties: false`, so it cannot be a manifest field.
+
+---
+
 ### 5.1 Table privileges — a grant is not a policy
 
 RLS constrains *which* rows a role may touch; it does not grant the privilege to
@@ -1075,12 +1104,15 @@ Constraints these must satisfy, all `[V12]`:
    carry references, not content: a closed key set per event type, fail-closed
    registration, and an 8 KiB bound. This was the decision gating any erasure
    story, since the chain cannot be edited once written.
-4. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
-5. **Language dependency versions** (§6.2) — deliberately unpinned here.
-6. **`users` / `models` exemption from RLS** (§5).
-7. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
+4. ~~**Artifact retention enforcement** (§4.3)~~ — **RESOLVED by ADR-0005.**
+   The 7/90/365 schedule is applied by the store; held classes carry no timer,
+   cannot be downgraded, and cannot be offered to a deletion job.
+5. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
+6. **Language dependency versions** (§6.2) — deliberately unpinned here.
+7. **`users` / `models` exemption from RLS** (§5).
+8. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
    by every tenant under a dedicated read policy.
-8. **Role and function names** — already approved under ADR-0001.
+9. **Role and function names** — already approved under ADR-0001.
 
 **Complete enumeration.** The list below is generated from the
 `[DECISION]` tags in `continuum_v1.2_core_schema.derived.sql`, so it cannot

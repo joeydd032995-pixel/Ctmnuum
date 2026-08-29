@@ -129,13 +129,20 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     accepted (ADR-0004).
 27. Bulk content cannot be inlined into an event; `events.payload` carries the
     tightened 8 KiB domain.
+28. The v1.2 retention schedule (7 / 90 / 365 days) is applied to the bounded
+    classes; a held class cannot be given an expiry, a bounded class cannot
+    escape one (ADR-0005).
+29. Retention is a ratchet: a `legal_hold` artifact cannot be downgraded to
+    `ephemeral`; strengthening still works.
+30. Expiry eligibility is structural: an expired artifact is offered, held and
+    unexpired ones never are, and one already recorded as removed drops out.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–27 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–30 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -153,7 +160,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–27
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–30
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -504,6 +511,61 @@ Worth recording because the assertion did exactly its job — a new table cannot
 quietly escape the tenant-isolation requirement, which is the failure mode it
 was written for. The fix was verified in both directions: the exemption passes,
 and an ordinary unprotected table still fails.
+
+## Seventh round: making the retention schedule executable
+
+ADR-0003 named artifact retention as the one deletion mechanism v1.2 actually
+specifies, and noted that none of it was built. ADR-0005 builds it.
+
+v1.2 gives the schedule directly — `ephemeral` 7 days, `standard` 90,
+`durable` 365, `immutable` and `legal_hold` policy-defined — and, crucially,
+constrains where enforcement may live: **S3 Object Lock is reserved for the
+audit bucket**, "only enabled after a specific retention/legal decision". So
+Object Lock is not the control holding `immutable` and `legal_hold` artifacts.
+The manifest store is, and a schedule living only in a runbook is not
+enforcement.
+
+| Mechanism | Property |
+|---|---|
+| `artifacts_apply_retention` | Derives `delete_after` from `created_at` and the class |
+| `artifacts_retention_expiry_consistent` | Held classes carry no expiry; bounded ones must |
+| `artifacts_retention_no_weakening` | A class can be strengthened, never lowered |
+| `artifacts_due_for_expiry` | Eligibility answered by the schema; a hold cannot appear |
+| `content_deleted_at` | The object goes, the manifest row stays |
+
+The ratchet is the load-bearing part. A `legal_hold` artifact cannot be deleted
+— but nothing otherwise stops relabelling it `ephemeral` and waiting seven days,
+and `continuum_app` holds `UPDATE` on `artifacts`. Without the trigger the holds
+are advisory.
+
+### An assertion of mine was decorative, and negative testing caught it
+
+Assertion 28 originally computed its expected expiry dates by calling
+`continuum.artifact_retention_days()` — **the function under test**. Both sides
+moved together, so the schedule could drift from v1.2 while the assertion passed
+happily. Changing `ephemeral` from 7 days to 30 produced no failure.
+
+| Configuration | Result |
+|---|---|
+| `ephemeral` drifted 7 → 30 days | `the v1.2 retention schedule (7/90/365) was not applied to 1 of 3` |
+| `durable` drifted 365 → 400 days | same |
+| No-weakening trigger dropped | `a legal_hold artifact was downgraded to ephemeral` |
+| Consistency `CHECK` dropped | `a legal_hold artifact was given an expiry` |
+| View widened to ignore `content_deleted_at` | `an artifact already expired is still offered` |
+| Correct configuration | passes |
+
+The first two rows only exist because the defect was found by running the broken
+configuration rather than by reading the assertion. It now compares against the
+literal v1.2 dates. This is the same failure mode as `F-02`, in a file whose
+governing rule is that a test which cannot fail is a defect — which is why every
+assertion here is run against a deliberately broken schema before it is trusted.
+
+### What this does not do
+
+The lifecycle job is not written. Nothing yet reads `artifacts_due_for_expiry`,
+deletes the S3 object and sets `content_deleted_at`. ADR-0005 gives that job a
+contract it cannot violate; it does not implement it. The audit bucket's Object
+Lock decision is untouched, as v1.2 reserves it.
 
 ## What this package deliberately does not do
 

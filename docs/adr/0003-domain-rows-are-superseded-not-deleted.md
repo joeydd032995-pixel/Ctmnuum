@@ -98,9 +98,10 @@ an answer.
 
 **Deferred, deliberately.**
 
-1. **Artifact retention enforcement** — honouring `delete_after`, and making
-   `immutable` and `legal_hold` block removal. This is the deletion mechanism
-   v1.2 specifies and none of it is built.
+1. ~~**Artifact retention enforcement**~~ — **RESOLVED by ADR-0005.** The
+   7/90/365 schedule is applied by the store, held classes carry no expiry and
+   cannot be downgraded, and the eligibility view structurally cannot offer a
+   hold to a deletion job. The lifecycle job itself remains unwritten.
 2. ~~**Event payload policy**~~ — **RESOLVED by ADR-0004.** Payloads carry
    references, not content: a closed key set per event type, fail-closed
    registration, and an 8 KiB bound. Erasure is now possible without touching

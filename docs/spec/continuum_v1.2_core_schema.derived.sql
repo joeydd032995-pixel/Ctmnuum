@@ -603,11 +603,37 @@ CREATE TABLE continuum.artifacts (
     classification      continuum.artifact_classification NOT NULL,   -- [V12]
     retention_class     continuum.retention_class NOT NULL,           -- [V12]
     delete_after        timestamptz,                                  -- [V12] nullable
+    -- [DECISION: ADR-0005] Store-side only. The v1.2 artifact manifest sets
+    -- additionalProperties:false, so this cannot be a manifest field; it records
+    -- that the OBJECT was expired from storage while the manifest row remains.
+    -- Retaining the row is deliberate: ADR-0003 keeps domain rows, and a row
+    -- pointing at removed content still truthfully records that the artifact
+    -- existed and when its content went. It is also what stops a lifecycle job
+    -- selecting the same artifact forever.
+    content_deleted_at  timestamptz,                                  -- [DECISION: ADR-0005]
     producer_component  text NOT NULL,                                -- [V12]
     producer_version    text NOT NULL,                                -- [V12]
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                 -- [V12]
     metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V12] [DERIVED bound]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V12] required
+    created_at          timestamptz NOT NULL DEFAULT now(),           -- [V12] required
+    -- [DECISION: ADR-0005] The two classes that exist to prevent removal carry
+    -- no expiry; the three bounded classes must carry one. Written as an
+    -- explicit CASE rather than a boolean expression over NULLs: `delete_after
+    -- IS NULL` inside an OR would let a NULL make the whole CHECK NULL, and
+    -- CHECK rejects only FALSE. That exact three-valued trap has already been a
+    -- defect in this file once.
+    CONSTRAINT artifacts_retention_expiry_consistent CHECK (
+        CASE
+            WHEN retention_class IN ('immutable', 'legal_hold')
+                THEN delete_after IS NULL
+            ELSE delete_after IS NOT NULL
+        END
+    ),
+    -- Content cannot be recorded as expired before it was due to expire.
+    CONSTRAINT artifacts_expiry_precedes_removal CHECK (
+        content_deleted_at IS NULL
+        OR (delete_after IS NOT NULL AND content_deleted_at >= delete_after)
+    )
 );
 
 CREATE INDEX artifacts_sha_idx ON continuum.artifacts (workspace_id, sha256);  -- [DERIVED]
@@ -790,6 +816,110 @@ $$;
 CREATE TRIGGER events_check_payload
     BEFORE INSERT ON continuum.events
     FOR EACH ROW EXECUTE FUNCTION continuum.events_check_payload();
+
+-- ---------------------------------------------------------------------------
+-- Artifact retention                                                    [V12]
+-- ---------------------------------------------------------------------------
+--
+-- v1.2 states the initial retention schedule directly:
+--
+--     ephemeral    7 days        immutable   policy-defined
+--     standard    90 days        legal_hold  policy-defined
+--     durable    365 days
+--
+-- and reserves S3 Object Lock for the AUDIT bucket alone, "only enabled after a
+-- specific retention/legal decision". Object Lock is therefore not the control
+-- that holds immutable and legal_hold artifacts; this store is. What follows
+-- makes the schedule structural rather than a comment in a runbook.
+--
+-- Deletion here means the OBJECT in storage. The manifest row stays --
+-- ADR-0003 keeps domain rows, and a row recording that content existed and when
+-- it was expired is exactly the audit posture the rest of this schema takes.
+
+-- [V12] the schedule above. NULL means the class does not expire on a timer.
+CREATE OR REPLACE FUNCTION continuum.artifact_retention_days(
+    class continuum.retention_class)
+RETURNS integer
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+    SELECT CASE class
+        WHEN 'ephemeral' THEN 7
+        WHEN 'standard'  THEN 90
+        WHEN 'durable'   THEN 365
+        ELSE NULL           -- immutable, legal_hold: policy-defined, no timer
+    END;
+$$;
+
+-- [DECISION: ADR-0005] Derive delete_after from the class when the caller does
+-- not supply one, so the schedule is applied by default rather than remembered.
+-- A caller may still set an earlier or later date for a bounded class; what it
+-- may not do is give a held class an expiry, which the CHECK refuses.
+CREATE OR REPLACE FUNCTION continuum.artifacts_apply_retention()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    days integer := continuum.artifact_retention_days(NEW.retention_class);
+BEGIN
+    IF NEW.delete_after IS NULL AND days IS NOT NULL THEN
+        NEW.delete_after := NEW.created_at + make_interval(days => days);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER artifacts_apply_retention
+    BEFORE INSERT ON continuum.artifacts
+    FOR EACH ROW EXECUTE FUNCTION continuum.artifacts_apply_retention();
+
+-- [DECISION: ADR-0005] Retention may be strengthened, never weakened.
+--
+-- This is the attack the schedule invites: an artifact under legal_hold cannot
+-- be deleted, but nothing stops a caller relabelling it 'ephemeral' and waiting
+-- seven days. continuum_app holds UPDATE on artifacts, so without this the hold
+-- is advisory.
+--
+-- The comparison relies on the declared order of continuum.retention_class,
+-- which assertion 25 pins to exactly the v1.2 list, so a reordering that would
+-- silently invert this check fails there first.
+--
+-- Lifting a hold is deliberately NOT expressible through the application: it
+-- requires the table owner, i.e. a migration, which is the auditable path.
+CREATE OR REPLACE FUNCTION continuum.artifacts_retention_no_weakening()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.retention_class < OLD.retention_class THEN
+        RAISE EXCEPTION
+            'retention cannot be weakened: % -> %',
+            OLD.retention_class, NEW.retention_class
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER artifacts_retention_no_weakening
+    BEFORE UPDATE ON continuum.artifacts
+    FOR EACH ROW EXECUTE FUNCTION continuum.artifacts_retention_no_weakening();
+
+-- [DECISION: ADR-0005] The question a lifecycle job asks, answered by the
+-- schema rather than by the job. A held artifact cannot appear here: the
+-- predicate requires a delete_after, and the CHECK guarantees immutable and
+-- legal_hold have none. A job that selects from this view cannot delete
+-- something it was not allowed to delete, even if it is written carelessly.
+CREATE OR REPLACE VIEW continuum.artifacts_due_for_expiry AS
+    SELECT id, workspace_id, storage_bucket, storage_key, storage_version_id,
+           retention_class, delete_after
+      FROM continuum.artifacts
+     WHERE delete_after IS NOT NULL
+       AND delete_after <= now()
+       AND content_deleted_at IS NULL;
+
+COMMENT ON VIEW continuum.artifacts_due_for_expiry IS
+    'Artifacts whose object may be removed from storage now. Structurally '
+    'cannot include immutable or legal_hold: those carry no delete_after.';
 
 -- [DERIVED] Server-side hash chain. v1.2 states that the previous_hash/
 -- event_hash chain "allows Continuum to detect silent modification of audit

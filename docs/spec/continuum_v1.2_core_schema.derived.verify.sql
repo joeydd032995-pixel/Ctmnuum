@@ -908,4 +908,171 @@ BEGIN
 END
 $$;
 
+-- 28. The v1.2 retention schedule is applied, not remembered.
+--
+--     ephemeral 7 / standard 90 / durable 365 days; immutable and legal_hold
+--     are policy-defined and carry no timer. [V12]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    got integer;
+BEGIN
+    FOR got IN SELECT 1 LOOP EXIT; END LOOP;
+
+    -- each bounded class gets its scheduled expiry derived from created_at
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, producer_component, producer_version, created_at)
+    SELECT gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('a', 64),
+           'b', 'k/' || c::text, 'arn', 'internal', c, 'p', '1',
+           timestamptz '2026-01-01 00:00:00+00'
+      FROM unnest(ARRAY['ephemeral','standard','durable']::continuum.retention_class[]) AS c;
+
+    -- The expected dates are the LITERAL v1.2 numbers, not
+    -- artifact_retention_days() applied to itself. Deriving the expectation
+    -- from the function under test would let the schedule drift from v1.2
+    -- with both sides moving together -- an assertion that cannot fail.
+    SELECT count(*) INTO got
+      FROM continuum.artifacts
+     WHERE workspace_id = ws
+       AND created_at = timestamptz '2026-01-01 00:00:00+00'
+       AND delete_after = CASE retention_class
+               WHEN 'ephemeral' THEN timestamptz '2026-01-08 00:00:00+00'  -- +7
+               WHEN 'standard'  THEN timestamptz '2026-04-01 00:00:00+00'  -- +90
+               WHEN 'durable'   THEN timestamptz '2027-01-01 00:00:00+00'  -- +365
+           END;
+    IF got <> 3 THEN
+        RAISE EXCEPTION
+            'the v1.2 retention schedule (7/90/365) was not applied to % of 3 '
+            'bounded classes', 3 - got;
+    END IF;
+
+    -- a held class must not be given an expiry
+    BEGIN
+        INSERT INTO continuum.artifacts (
+            id, workspace_id, kind, media_type, byte_length, sha256,
+            storage_bucket, storage_key, kms_key_arn, classification,
+            retention_class, delete_after, producer_component, producer_version)
+        VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('b', 64),
+                'b', 'k/held', 'arn', 'internal', 'legal_hold',
+                now() + interval '1 day', 'p', '1');
+        RAISE EXCEPTION 'a legal_hold artifact was given an expiry';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- and a bounded class must not escape having one
+    BEGIN
+        INSERT INTO continuum.artifacts (
+            id, workspace_id, kind, media_type, byte_length, sha256,
+            storage_bucket, storage_key, kms_key_arn, classification,
+            retention_class, producer_component, producer_version)
+        VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('c', 64),
+                'b', 'k/unbounded', 'arn', 'internal', 'ephemeral', 'p', '1');
+        -- the trigger fills it in; forcing it back to NULL must be refused
+        UPDATE continuum.artifacts SET delete_after = NULL
+         WHERE storage_key = 'k/unbounded';
+        RAISE EXCEPTION 'a bounded artifact was left without an expiry';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    RAISE NOTICE
+        'v1.2 retention schedule applied: 7/90/365 derived, held classes carry no timer';
+END
+$$;
+
+-- 29. Retention can be strengthened, never weakened.
+--
+--     Without this the holds are advisory: an artifact under legal_hold cannot
+--     be deleted, but relabelling it 'ephemeral' and waiting seven days would
+--     achieve the same thing, and continuum_app holds UPDATE on artifacts.
+--     [DECISION: ADR-0005]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    held uuid := gen_random_uuid();
+BEGIN
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, producer_component, producer_version)
+    VALUES (held, ws, 'k', 'application/json', 1, repeat('d', 64),
+            'b', 'k/hold', 'arn', 'internal', 'legal_hold', 'p', '1');
+
+    BEGIN
+        UPDATE continuum.artifacts
+           SET retention_class = 'ephemeral', delete_after = now()
+         WHERE id = held;
+        RAISE EXCEPTION 'a legal_hold artifact was downgraded to ephemeral';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- strengthening stays available
+    UPDATE continuum.artifacts
+       SET retention_class = 'legal_hold'
+     WHERE storage_key = 'k/unbounded' AND retention_class = 'ephemeral';
+
+    RAISE NOTICE 'retention is a ratchet: downgrade rejected, upgrade allowed';
+END
+$$;
+
+-- 30. A lifecycle job cannot be handed something it may not delete.
+--
+--     The eligibility question is answered by the schema, not by the job: the
+--     view requires a delete_after, and no held artifact has one. A carelessly
+--     written job selecting from this view still cannot reach a hold.
+--     [DECISION: ADR-0005]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    due_expired integer;
+    due_held    integer;
+    due_future  integer;
+BEGIN
+    -- an expired bounded artifact
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, delete_after, producer_component, producer_version)
+    VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('e', 64),
+            'b', 'k/expired', 'arn', 'internal', 'standard',
+            now() - interval '1 day', 'p', '1');
+
+    SELECT count(*) INTO due_expired
+      FROM continuum.artifacts_due_for_expiry WHERE storage_key = 'k/expired';
+    IF due_expired <> 1 THEN
+        RAISE EXCEPTION 'an expired artifact is not offered for expiry';
+    END IF;
+
+    SELECT count(*) INTO due_held
+      FROM continuum.artifacts_due_for_expiry
+     WHERE retention_class IN ('immutable', 'legal_hold');
+    IF due_held <> 0 THEN
+        RAISE EXCEPTION
+            '% held artifact(s) offered for expiry', due_held;
+    END IF;
+
+    SELECT count(*) INTO due_future
+      FROM continuum.artifacts_due_for_expiry WHERE delete_after > now();
+    IF due_future <> 0 THEN
+        RAISE EXCEPTION 'an unexpired artifact is offered for expiry';
+    END IF;
+
+    -- once recorded as removed it drops out, so a job cannot loop on it
+    UPDATE continuum.artifacts
+       SET content_deleted_at = now() WHERE storage_key = 'k/expired';
+    SELECT count(*) INTO due_expired
+      FROM continuum.artifacts_due_for_expiry WHERE storage_key = 'k/expired';
+    IF due_expired <> 0 THEN
+        RAISE EXCEPTION 'an artifact already expired is still offered';
+    END IF;
+
+    RAISE NOTICE
+        'expiry eligibility is structural: expired offered, held and unexpired never, removed drops out';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;
