@@ -834,34 +834,26 @@ is unset, every policy fails closed. `[V12]`
 ### 5.1 Table privileges — a grant is not a policy
 
 RLS constrains *which* rows a role may touch; it does not grant the privilege to
-touch any. Both are required, and the policies above are unreachable without
-the grants below. `[DERIVED]`
-
-**Fixed by ADR-0003.** `[DECISION: ADR-0003]`
+touch any. Both are required, and the policies above are unreachable without the
+grants below. `[DERIVED]`
 
 | Role | Privileges |
 |---|---|
 | `continuum_app` | `SELECT, INSERT, UPDATE` on the 21 domain tables; `SELECT` on `workspaces`, `users`, `models`; `INSERT, SELECT` on `events` plus `USAGE` on its sequence. **Never `DELETE`.** |
-| `continuum_maintenance` | `SELECT, DELETE` on 16 erasable tables; `SELECT` on `workspaces` and `models`. **Not** `users`. |
+| `continuum_maintenance` | Schema `USAGE` only — no table privileges. |
 | `continuum_migration` | `USAGE, CREATE` on the schema. |
 
-v1.2 supersedes rather than deletes, so hard deletion is not normal application
-behaviour; erasure and retention are a separate auditable duty carried by
-`continuum_maintenance`. That role is `NOBYPASSRLS` like every other, so each
-statement it issues is confined to the workspace in `app.workspace_id` — which
-bounds every statement, **not** the session's choice of workspace. See ADR-0003
-for the residual risk that leaves.
+**No role deletes a domain row.** `[DECISION: ADR-0003]` This follows the
+lifecycle §3 states rather than least privilege for its own sake: invalidation
+is stateful, `durable → invalidated → superseded_by`, and v1.2 says it
+*"preserves historical reasoning"*. Removal contradicts that.
 
-Seven tables are withheld from the erasure grant by explicit `REVOKE`:
-
-- `events`, `workspaces` — the append-only trigger would reject the delete.
-- `runs` — `events.run_id` is `NO ACTION` and the event cannot be removed.
-- `agents`, `tools`, `evaluations`, `mutations` — each parents a child whose
-  foreign key names it by `id` alone, and PostgreSQL applies referential actions
-  **without** evaluating the child's RLS policy, so a cascade from one of these
-  crosses the tenant boundary silently. Lifting this requires qualifying those
-  foreign keys by `workspace_id`, as `claim_evidence` and `memory_embeddings`
-  already are. `[DERIVED]`
+The deletion v1.2 *does* specify happens a layer down, on artifacts in object
+storage, through `retention_class` and `delete_after` — and two of the five
+classes, `immutable` and `legal_hold`, exist to prevent it. That lifecycle is not
+implemented; ADR-0003 records it, along with the open question of what may enter
+`events.payload`, which gates any erasure path at all. `[V12]` contract,
+`[DECISION: ADR-0003]` deferral.
 
 ---
 
@@ -1056,10 +1048,11 @@ Constraints these must satisfy, all `[V12]`:
    existing chains still verify. This was the highest-consequence item on the
    list; what made it urgent was not the layout but the fact that it could never
    be changed.
-2. ~~**Application deletion model** (§5.1)~~ — **RESOLVED by ADR-0003.** Hard
-   deletion belongs to `continuum_maintenance`, never the application; seven
-   tables are withheld from that grant, four of them because a cascade would
-   cross the tenant boundary without evaluating RLS.
+2. ~~**Application deletion model** (§5.1)~~ — **RESOLVED by ADR-0003.** No
+   role deletes a domain row: v1.2 states invalidation and supersession as the
+   lifecycle, and specifies deletion only for artifacts in object storage via
+   `retention_class` / `delete_after`. That lifecycle, and the event-payload
+   question that gates erasure, are deferred by the ADR.
 3. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
 4. **Language dependency versions** (§6.2) — deliberately unpinned here.
 5. **`users` / `models` exemption from RLS** (§5).

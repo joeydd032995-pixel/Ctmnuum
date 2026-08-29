@@ -119,13 +119,11 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     than as the superuser: own rows visible, another tenant's rows not, a
     cross-tenant write rejected, built-in agents readable, and no rows at all
     when the tenant context is unset.
-24. Erasure is maintenance-only and still tenant-scoped: the application role is
-    refused, `continuum_maintenance` erases within its own workspace, and cannot
-    reach another workspace's rows (ADR-0003).
-25. `continuum_maintenance` holds no *effective* `DELETE` on any of the seven
-    excluded tables (`has_table_privilege`, so inherited and `PUBLIC` grants
-    count), still holds it on `memories` so erasure is not decorative, and
-    cannot read `users`.
+24. No operational role can delete a domain row — the application role refused
+    behaviourally, and no *effective* `DELETE` (inherited or `PUBLIC` included)
+    for either operational role on any of the 25 tables.
+25. The artifact retention contract v1.2 specifies is intact: exactly the five
+    retention classes, a nullable `delete_after`, a `NOT NULL` retention class.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
@@ -347,71 +345,79 @@ extracted from the schema file rather than retyped:
 | Built-in agents dropped from the read policy | `built-in agents are invisible to a tenant under RLS` |
 | None (correct schema) | passes |
 
-## Fifth round: the erasure grant activated a latent cross-tenant hole
+## Fifth round: the deletion question was asked at the wrong layer
 
-Review of ADR-0003 returned six findings, two P1. All six were verified against
-the schema and all six were correct.
+The fourth round's grants raised an obvious follow-on — if the application must
+not delete, which role may? — and the answer taken was `continuum_maintenance`,
+on the reasoning that the three-way role split exists to express exactly that.
+Automated review then returned six findings on it, two P1, all correct: cascades
+from four parents cross the tenant boundary because PostgreSQL applies
+referential actions *without* evaluating the child's RLS policy; `NOBYPASSRLS`
+bounds each statement, not the session's choice of workspace; `runs` could not
+be purged at all; the assertion checked only direct grants; the ADR had not
+reached the primary artifact; and maintenance held global `SELECT` on `users`.
 
-The one that matters was not a flaw in the grant but a flaw the grant would have
-*reached*. Four tables — `agents`, `tools`, `evaluations`, `mutations` — parent a
-child whose foreign key names them by `id` alone, so a row in workspace B may
-reference a parent in workspace A. **PostgreSQL applies referential actions
-without evaluating the child's RLS policy.** Reproduced against the real shapes:
+Those were fixed. Then the prior question got asked — *is deletion required at
+all?* — and the answer changed the design.
 
-```
-tenant B rows before:                                       1
-maintenance, scoped to workspace A only, deletes A's agent    DELETE 1
-tenant B rows after:                                        0
-```
+### v1.2 specifies a deletion model, and it is not row deletion
 
-One tenant's maintenance job destroyed another tenant's data, with RLS enabled
-and forced, without the policy ever being evaluated. With `DELETE` revoked on
-the parent, the same attempt returns `permission denied for table agents` and
-the row survives.
+| Data class | v1.2 position |
+|---|---|
+| Domain rows | *"Invalidation is stateful rather than deletion: `durable → invalidated → superseded_by → newer memory`. This preserves historical reasoning."* |
+| Artifacts | A retention lifecycle in object storage: `retention_class` (`ephemeral / standard / durable / immutable / legal_hold`) and a nullable `delete_after`. Two classes exist to *prevent* removal. |
+| Events | Append-only. Undeletable by construction. |
 
-The single-column foreign keys predate this work — the defect is pre-existing,
-and it is the same class as finding 1 from the first review round, which was
-fixed for `claim_evidence` and `memory_embeddings` but not for these. What is
-new is that granting `DELETE` is what makes it reachable. The privilege is
-therefore withheld on those four parents, plus `runs` (`events.run_id` is
-`NO ACTION` and the event cannot be removed), until the foreign keys are
-qualified by `workspace_id`. That schema change is recorded in ADR-0003 as the
-required follow-up, with the exact list of constraints.
+So hard-deleting a memory or a claim contradicts a stated design principle
+rather than merely exceeding least privilege — and the one deletion mechanism
+v1.2 does call for operates a layer down and **is not implemented at all**. Two
+rounds went into hardening a grant for a capability the specification does not
+ask for, while the mechanism it does ask for had no lifecycle job and no
+assertion.
 
-| # | Finding | Resolution |
-|---:|---|---|
-| **P1** | `NOBYPASSRLS` bounds each *statement*, not the session's choice of workspace — a compromised maintenance credential can iterate workspace ids | ADR-0003's security claim corrected and the residual risk recorded; the real control is a trusted authorization boundary assigning the context, which is outside this schema |
-| **P1** | Cascades from four parents cross the tenant boundary without RLS | `DELETE` withheld on those parents; reproduced and re-tested |
-| P2 | `runs` unerasable in practice — `events.run_id` is `NO ACTION` | Excluded, with the reason recorded |
-| P2 | Assertion 25 checked `role_table_grants`, i.e. direct grants only | Now `has_table_privilege`; the inherited-grant case is in the test table below |
-| P2 | ADR-0003 was not carried into the primary derived artifact | §5.1 added to the artifact; the decision list marks it resolved |
-| P2 | Maintenance held `SELECT` on `users` — global, and carries email | Grant dropped; assertion 25 fails if it returns |
+### Row deletion would not have achieved erasure anyway
 
-### The first P1 was an over-claim in this package
+The event store holds `payload jsonb` and cannot be deleted from. If personal
+data reaches an event payload, removing the `memories` row leaves the content in
+a ledger nothing can touch — the appearance of erasure without the substance.
+What may enter `events.payload` is an open `[DECISION]`; v1.2 names the column
+and never says. That decision gates every erasure story and is recorded in
+ADR-0003 rather than assumed away.
 
-ADR-0003 said a role able to delete across every tenant "would be a single
-credential capable of destroying the entire estate", implying `NOBYPASSRLS`
-prevented that. It does not. It prevents doing it in one statement. A
-maintenance session sets `app.workspace_id` itself, so it can iterate. The ADR
-now says so plainly and records the mitigation as out of scope rather than
-implying a protection the schema does not provide.
+The mechanism that fits this architecture is crypto-shredding: artifacts are
+SSE-KMS encrypted under a per-artifact `kms_key_arn`, so destroying the key
+renders content unrecoverable while the hash chain stays verifiable. It works
+*with* an append-only ledger. The supporting columns are already `[V12]`.
 
-### Verification
+### Outcome
+
+No operational role holds `DELETE`. `continuum_maintenance` returns to schema
+`USAGE` only — a privilege granted before a demonstrated need is one nobody has
+reasoned about. This also makes the cross-tenant cascade unreachable, since no
+role can initiate a cascading delete; that defect is still real and still worth
+fixing, but it is no longer load-bearing.
 
 | Configuration | Assertion result |
 |---|---|
-| `continuum_app` granted `DELETE` | `continuum_app was able to hard-delete a row` |
-| `continuum_maintenance` missing `DELETE` | `permission denied for table memories` |
-| `continuum_maintenance` made `BYPASSRLS` | `deleted 1 row(s) from another workspace` |
-| `DELETE` on a cascade-unsafe parent | `holds effective DELETE on {tools}` |
-| `DELETE` inherited via another role | `holds effective DELETE on {runs}` |
-| `SELECT` on `users` granted | `a job scoped to one tenant would see every person` |
-| `DELETE` on `memories` withheld | `erasure is not possible` |
+| `continuum_app` granted `DELETE` | `continuum_app deleted a domain row` |
+| `continuum_maintenance` granted `DELETE` | `holds effective DELETE … {continuum_maintenance.claims}` |
+| `DELETE` inherited via another role | `holds effective DELETE … {continuum_maintenance.runs}` |
+| A sixth `retention_class` added | `retention_class drifted from the v1.2 manifest` |
+| `delete_after` made `NOT NULL` | `must be a nullable timestamptz` |
+| `retention_class` made nullable | `must be NOT NULL` |
 | Correct configuration | passes |
 
-The inherited-grant row is the one that justifies the `has_table_privilege`
-change: `role_table_grants` lists only direct grants, so it passed that case
-while the role held the effective privilege.
+`delete_after` must stay nullable because `legal_hold` and `immutable` are
+exactly the classes with no expiry — a `NOT NULL` column would make the two
+anti-deletion classes unrepresentable.
+
+### What this round is really a record of
+
+The first four rounds found defects by executing. This one found a defect by
+asking whether the requirement existed. Every finding in the maintenance-role
+review was correct and worth fixing, and the whole structure being fixed should
+not have been built. Checking the specification for a stated position costs one
+grep; it was not done until prompted.
 
 ## What this package deliberately does not do
 

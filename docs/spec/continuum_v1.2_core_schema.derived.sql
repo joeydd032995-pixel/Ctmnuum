@@ -910,102 +910,45 @@ GRANT USAGE ON SCHEMA continuum TO continuum_app;
 -- that runs as a superuser would notice -- superusers bypass RLS entirely,
 -- FORCE included, so the predicates are never evaluated.
 --
--- [DECISION: ADR-0003] The application role never deletes. v1.2 supersedes
--- rather than deletes (`superseded_by` on claims and memories, promotion stages
--- on mutations), so hard deletion is not part of normal application behaviour.
--- Erasure and retention are a separate, auditable duty and belong to
--- continuum_maintenance, which is the role the three-way split already exists
--- to express. workspaces and models are read-only to the application: creating
--- a tenant or registering a model is an administrative act.
+-- [DECISION: ADR-0003] No role deletes domain rows. v1.2 is explicit that the
+-- memory lifecycle is stateful invalidation, not removal --
 --
--- continuum_maintenance is NOBYPASSRLS like every other role, so each statement
--- it issues is confined to the workspace named by app.workspace_id. Note the
--- precise scope of that guarantee: it bounds every *statement*, not the
--- session's choice of workspace. See ADR-0003 for what this does and does not
--- protect against.
+--     durable -> invalidated -> superseded_by -> newer memory
+--     "This preserves historical reasoning."
+--
+-- so hard deletion of a memory or a claim contradicts the stated design rather
+-- than merely exceeding least privilege. continuum_app therefore holds
+-- SELECT, INSERT, UPDATE and never DELETE, and continuum_maintenance holds no
+-- table privileges at all: there is no demonstrated need for one, and a
+-- privilege granted before a need is a privilege nobody has reasoned about.
+--
+-- The one deletion mechanism v1.2 does specify operates a layer down, on
+-- artifacts in object storage, through retention_class and delete_after (see
+-- continuum.artifacts). Two of its five classes -- immutable and legal_hold --
+-- exist to prevent removal. That lifecycle is not implemented here; ADR-0003
+-- records it as the work this decision defers to.
+--
+-- workspaces, users and models are read-only to the application: creating a
+-- tenant or registering a model is an administrative act.
 DO $$
 DECLARE
     t text;
-    -- Tables the application reads and writes.
-    app_tables constant text[] := ARRAY[
+BEGIN
+    FOREACH t IN ARRAY ARRAY[
         'workspace_members','runs','artifacts','agents','agent_versions',
         'model_metrics','evidence','claims','claim_evidence','memories',
         'memory_embeddings','memory_edges','failures','tools','tool_versions',
         'tool_executions','evaluations','evaluation_results','mutations',
         'mutation_evaluations','cost_events'
-    ];
-    -- Tables maintenance may erase. See the exclusion note below for what is
-    -- deliberately absent and why.
-    erasable_tables constant text[] := ARRAY[
-        'workspace_members','artifacts','agent_versions','model_metrics',
-        'evidence','claims','claim_evidence','memories','memory_embeddings',
-        'memory_edges','failures','tool_versions','tool_executions',
-        'evaluation_results','mutation_evaluations','cost_events'
-    ];
-BEGIN
-    FOREACH t IN ARRAY app_tables LOOP
+    ] LOOP
         EXECUTE format(
             'GRANT SELECT, INSERT, UPDATE ON continuum.%I TO continuum_app', t);
-    END LOOP;
-
-    FOREACH t IN ARRAY erasable_tables LOOP
-        -- SELECT as well as DELETE: a retention job has to find the rows before
-        -- it can remove them.
-        EXECUTE format(
-            'GRANT SELECT, DELETE ON continuum.%I TO continuum_maintenance', t);
     END LOOP;
 
     FOREACH t IN ARRAY ARRAY['workspaces','users','models'] LOOP
         EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_app', t);
     END LOOP;
-
-    -- [DERIVED] Maintenance reads workspaces and models for context, but NOT
-    -- users. users is not workspace-scoped and carries email and display name,
-    -- so a SELECT there would let a job scoped to one tenant read every person
-    -- in the database -- exactly the reach ADR-0003 says erasure does not have.
-    FOREACH t IN ARRAY ARRAY['workspaces','models'] LOOP
-        EXECUTE format('GRANT SELECT ON continuum.%I TO continuum_maintenance', t);
-    END LOOP;
 END
 $$;
-
--- [DERIVED] What maintenance may NOT delete, and why. Enforced by explicit
--- REVOKE rather than by absence of a GRANT, so a later blanket grant cannot
--- silently reintroduce any of it.
---
---   events        append-only. events_append_only rejects DELETE for every
---                 role, triggers included, so the grant could never be
---                 exercised -- worse than none, because it reads as permission.
---
---   workspaces    deleting a workspace cascades into the event store, where
---                 that trigger raises. Teardown cannot work by cascade and
---                 needs its own retention decision. ADR-0003.
---
---   runs          events.run_id references runs(id) with the default NO ACTION,
---                 and the referencing event cannot be deleted or cleared, so a
---                 purge of any run that has recorded an event raises a foreign
---                 key violation. The grant would be exercisable only for runs
---                 that never emitted an event.
---
---   agents        each of these is the parent of a child whose foreign key
---   tools         names the parent by id alone, so a child in workspace B may
---   evaluations   reference a parent in workspace A. PostgreSQL applies
---   mutations     referential actions WITHOUT evaluating the child's RLS
---                 policy, so an ON DELETE CASCADE from one of these parents
---                 would delete another tenant's rows -- silently defeating the
---                 tenant scoping this grant is supposed to preserve.
---                 (agent_versions.agent_id, tool_versions.tool_id,
---                 evaluation_results.evaluation_id,
---                 mutation_evaluations.mutation_id and .evaluation_id.)
---
--- The last group is a pre-existing defect in the reconstruction, not one this
--- grant introduces -- but the grant is what would make it reachable, so the
--- privilege is withheld until the foreign keys are qualified by workspace_id in
--- the same way claim_evidence and memory_embeddings already are. Tracked in
--- ADR-0003 as the follow-up.
-REVOKE DELETE ON
-    continuum.events, continuum.workspaces, continuum.runs,
-    continuum.agents, continuum.tools, continuum.evaluations, continuum.mutations
-    FROM continuum_maintenance;
 GRANT USAGE, CREATE ON SCHEMA continuum TO continuum_migration;
 GRANT USAGE ON SCHEMA continuum TO continuum_maintenance;

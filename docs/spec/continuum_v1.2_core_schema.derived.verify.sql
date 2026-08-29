@@ -681,111 +681,102 @@ BEGIN
 END
 $$;
 
--- 24. Erasure is a maintenance duty, and it is still tenant-scoped.
+-- 24. Nothing deletes a domain row. v1.2 states the memory lifecycle as
+--     stateful invalidation -- durable -> invalidated -> superseded_by -- and
+--     says it "preserves historical reasoning", so removal contradicts the
+--     design rather than merely exceeding least privilege.
 --
---     ADR-0003: the application role never hard-deletes; continuum_maintenance
---     does, and is NOBYPASSRLS like every other role, so a purge runs inside a
---     tenant context rather than sweeping across workspaces. A grant alone would
---     not establish that -- this exercises all four halves of the claim.
---     [DECISION: ADR-0003]
+--     Tested behaviourally for the application role, and by effective
+--     privilege for every operational role: has_table_privilege, not
+--     role_table_grants, so a DELETE inherited from another role or granted to
+--     PUBLIC is caught. [V12] lifecycle, [DECISION: ADR-0003] enforcement
 DO $$
 DECLARE
     ws_a constant uuid := '00000000-0000-0000-0000-0000000000aa';
-    ws_b constant uuid := '00000000-0000-0000-0000-0000000000bb';
-    doomed uuid := gen_random_uuid();
-    survivor_b integer;
-    removed integer;
+    r    text;
+    t    text;
+    held text[] := ARRAY[]::text[];
 BEGIN
-    INSERT INTO continuum.memories (id, workspace_id, memory_type, content, content_hash)
-    VALUES (doomed, ws_a, 'semantic', 'to be erased', repeat('e', 64));
-
-    -- 1. the application role must NOT be able to delete
     SET LOCAL ROLE continuum_app;
     PERFORM set_config('app.workspace_id', ws_a::text, true);
     BEGIN
-        DELETE FROM continuum.memories WHERE id = doomed;
-        RAISE EXCEPTION 'continuum_app was able to hard-delete a row';
+        DELETE FROM continuum.memories WHERE workspace_id = ws_a;
+        RAISE EXCEPTION 'continuum_app deleted a domain row';
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
     RESET ROLE;
 
-    -- 2. the maintenance role must be able to, within its tenant context
-    SET LOCAL ROLE continuum_maintenance;
-    PERFORM set_config('app.workspace_id', ws_a::text, true);
-    DELETE FROM continuum.memories WHERE id = doomed;
-    GET DIAGNOSTICS removed = ROW_COUNT;
-    IF removed <> 1 THEN
-        RAISE EXCEPTION 'continuum_maintenance could not erase a row in its own workspace';
-    END IF;
+    FOREACH r IN ARRAY ARRAY['continuum_app','continuum_maintenance'] LOOP
+        FOREACH t IN ARRAY ARRAY[
+            'workspace_members','runs','artifacts','agents','agent_versions',
+            'model_metrics','evidence','claims','claim_evidence','memories',
+            'memory_embeddings','memory_edges','failures','tools','tool_versions',
+            'tool_executions','evaluations','evaluation_results','mutations',
+            'mutation_evaluations','cost_events','events','workspaces','users','models'
+        ] LOOP
+            IF has_table_privilege(r, 'continuum.' || t, 'DELETE') THEN
+                held := held || (r || '.' || t);
+            END IF;
+        END LOOP;
+    END LOOP;
 
-    -- 3. and must NOT reach another workspace's rows: RLS still applies to it
-    DELETE FROM continuum.memories WHERE workspace_id = ws_b;
-    GET DIAGNOSTICS removed = ROW_COUNT;
-    IF removed <> 0 THEN
+    IF cardinality(held) > 0 THEN
         RAISE EXCEPTION
-            'continuum_maintenance deleted % row(s) from another workspace', removed;
-    END IF;
-    RESET ROLE;
-
-    SELECT count(*) INTO survivor_b
-      FROM continuum.memories WHERE workspace_id = ws_b;
-    IF survivor_b = 0 THEN
-        RAISE EXCEPTION 'tenant B rows did not survive a tenant A purge';
+            'a role holds effective DELETE on a domain table: %; v1.2 supersedes '
+            'rather than deletes', held;
     END IF;
 
     RAISE NOTICE
-        'erasure is maintenance-only and tenant-scoped: app denied, maintenance erased 1 row in its own workspace, other tenant untouched';
+        'no operational role can delete a domain row; supersession is the lifecycle';
 END
 $$;
 
--- 25. Nothing maintenance must not erase is erasable -- by any route.
---
---     has_table_privilege, not role_table_grants: the latter lists only DIRECT
---     grants, so a privilege inherited from another role or granted to PUBLIC
---     would satisfy it while the role still holds the effective permission.
---
---     The excluded set is not arbitrary. events and workspaces would raise on
---     the append-only trigger; runs would raise on events.run_id (NO ACTION);
---     and agents, tools, evaluations and mutations each parent a child whose
---     foreign key names the parent by id alone, so an ON DELETE CASCADE from
---     them crosses the tenant boundary WITHOUT evaluating the child's RLS
---     policy. [DERIVED]
+-- 25. The one deletion mechanism v1.2 DOES specify is modelled: artifact
+--     retention. Bulk content lives in object storage and is governed by a
+--     retention class and an optional expiry, two of whose classes exist to
+--     prevent removal. The lifecycle that acts on these is not implemented yet
+--     (ADR-0003); this asserts the contract it will act on has not drifted.
+--     [V12] artifact manifest
 DO $$
 DECLARE
-    t text;
-    leaked text[] := ARRAY[]::text[];
+    classes text[];
+    coltype text;
+    nullable text;
 BEGIN
-    FOREACH t IN ARRAY ARRAY[
-        'events','workspaces','runs','agents','tools','evaluations','mutations'
-    ] LOOP
-        IF has_table_privilege('continuum_maintenance', 'continuum.' || t, 'DELETE') THEN
-            leaked := leaked || t;
-        END IF;
-    END LOOP;
+    SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) INTO classes
+      FROM pg_enum e
+      JOIN pg_type ty ON ty.oid = e.enumtypid
+      JOIN pg_namespace n ON n.oid = ty.typnamespace
+     WHERE n.nspname = 'continuum' AND ty.typname = 'retention_class';
 
-    IF cardinality(leaked) > 0 THEN
-        RAISE EXCEPTION
-            'continuum_maintenance holds effective DELETE on %; each would either '
-            'raise on a trigger or cascade across the tenant boundary', leaked;
+    IF classes IS DISTINCT FROM
+       ARRAY['ephemeral','standard','durable','immutable','legal_hold'] THEN
+        RAISE EXCEPTION 'retention_class drifted from the v1.2 manifest: %', classes;
     END IF;
 
-    -- The role must still be able to erase what it is for, or the grant is
-    -- decorative and assertion 24 is the only thing standing between this
-    -- schema and a purge that silently does nothing.
-    IF NOT has_table_privilege('continuum_maintenance', 'continuum.memories', 'DELETE') THEN
-        RAISE EXCEPTION 'continuum_maintenance cannot erase memories; erasure is not possible';
+    SELECT c.data_type, c.is_nullable INTO coltype, nullable
+      FROM information_schema.columns c
+     WHERE c.table_schema = 'continuum' AND c.table_name = 'artifacts'
+       AND c.column_name = 'delete_after';
+    IF coltype IS DISTINCT FROM 'timestamp with time zone' OR nullable <> 'YES' THEN
+        RAISE EXCEPTION
+            'artifacts.delete_after must be a nullable timestamptz, got % (nullable %)',
+            coltype, nullable;
     END IF;
 
-    -- users is global and carries email; a tenant-scoped job must not read it.
-    IF has_table_privilege('continuum_maintenance', 'continuum.users', 'SELECT') THEN
-        RAISE EXCEPTION
-            'continuum_maintenance can read continuum.users, which is not '
-            'workspace-scoped: a job scoped to one tenant would see every person';
+    -- legal_hold and immutable must be expressible without an expiry, or the
+    -- classes that exist to prevent deletion could not be represented.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema='continuum' AND table_name='artifacts'
+           AND column_name='retention_class' AND is_nullable='YES'
+    ) THEN
+        RAISE EXCEPTION 'artifacts.retention_class must be NOT NULL';
     END IF;
 
     RAISE NOTICE
-        'erasure grant is confined: no cascade-unsafe or trigger-blocked table, no global user visibility';
+        'artifact retention contract intact: five v1.2 classes, nullable delete_after';
 END
 $$;
 
