@@ -88,7 +88,12 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname='continuum'
       AND c.relkind='r'
-      AND c.relname NOT IN ('users','models')   -- [DECISION] not workspace-scoped
+      -- [DECISION] not workspace-scoped: users and models are global reference
+      -- data; event_schemas is a global contract registry (ADR-0004). A
+      -- per-tenant event catalogue would let one tenant declare types the
+      -- validator applies differently for another, which is the opposite of
+      -- what the registry is for.
+      AND c.relname NOT IN ('users','models','event_schemas')
       AND (c.relrowsecurity IS FALSE OR c.relforcerowsecurity IS FALSE);
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'RLS not enabled/forced on: %', bad;
@@ -96,6 +101,16 @@ BEGIN
     RAISE NOTICE 'RLS enabled and forced on all tenant-scoped tables';
 END
 $$;
+
+-- Test event types. The registry ships empty and fails closed (ADR-0004), so
+-- every type these assertions write must be registered first. That the fixtures
+-- have to exist at all is the mechanism working.
+INSERT INTO continuum.event_schemas (event_type, schema_version, allowed_keys, description)
+VALUES
+    ('VerifyEvent',     1, ARRAY['note'],       'append-only checks'),
+    ('OversizeEvent',   1, ARRAY['blob'],       'payload bound check'),
+    ('ChainEvent',      1, ARRAY['seq'],        'hash chain ordering'),
+    ('ForgedEvent',     1, ARRAY['note'],       'forged previous_hash check');
 
 -- 6. Event store rejects UPDATE and DELETE                             [V12]
 INSERT INTO continuum.workspaces (id, name)
@@ -312,7 +327,8 @@ BEGIN
 END
 $$;
 
--- 14. The >256 KiB offload rule is enforced by the type, not by convention  [V12]
+-- 14. The event payload bound is enforced by the type, not by convention
+--     [V12] offload rule, [DECISION: ADR-0004] the 8 KiB event bound
 DO $$
 BEGIN
     BEGIN
@@ -325,7 +341,7 @@ BEGIN
             '00000000-0000-0000-0000-0000000000aa', 'system',
             jsonb_build_object('blob', repeat('x', 300000)), now()
         );
-        RAISE EXCEPTION 'a >256 KiB payload was accepted inline';
+        RAISE EXCEPTION 'an oversized payload was accepted inline';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'oversized JSONB payload rejected: enforced';
     END;
@@ -678,6 +694,384 @@ BEGIN
 
     RAISE NOTICE
         'tenant isolation enforced as continuum_app: own rows only, cross-tenant write rejected, fails closed';
+END
+$$;
+
+-- 24. Nothing deletes a domain row. v1.2 states the memory lifecycle as
+--     stateful invalidation -- durable -> invalidated -> superseded_by -- and
+--     says it "preserves historical reasoning", so removal contradicts the
+--     design rather than merely exceeding least privilege.
+--
+--     Tested behaviourally for the application role, and by effective
+--     privilege for every operational role: has_table_privilege, not
+--     role_table_grants, so a DELETE inherited from another role or granted to
+--     PUBLIC is caught. [V12] lifecycle, [DECISION: ADR-0003] enforcement
+DO $$
+DECLARE
+    ws_a constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    r    text;
+    t    text;
+    held text[] := ARRAY[]::text[];
+BEGIN
+    SET LOCAL ROLE continuum_app;
+    PERFORM set_config('app.workspace_id', ws_a::text, true);
+    BEGIN
+        DELETE FROM continuum.memories WHERE workspace_id = ws_a;
+        RAISE EXCEPTION 'continuum_app deleted a domain row';
+    EXCEPTION WHEN insufficient_privilege THEN
+        NULL;
+    END;
+    RESET ROLE;
+
+    FOREACH r IN ARRAY ARRAY['continuum_app','continuum_maintenance'] LOOP
+        FOREACH t IN ARRAY ARRAY[
+            'workspace_members','runs','artifacts','agents','agent_versions',
+            'model_metrics','evidence','claims','claim_evidence','memories',
+            'memory_embeddings','memory_edges','failures','tools','tool_versions',
+            'tool_executions','evaluations','evaluation_results','mutations',
+            'mutation_evaluations','cost_events','events','workspaces','users','models'
+        ] LOOP
+            IF has_table_privilege(r, 'continuum.' || t, 'DELETE') THEN
+                held := held || (r || '.' || t);
+            END IF;
+        END LOOP;
+    END LOOP;
+
+    IF cardinality(held) > 0 THEN
+        RAISE EXCEPTION
+            'a role holds effective DELETE on a domain table: %; v1.2 supersedes '
+            'rather than deletes', held;
+    END IF;
+
+    RAISE NOTICE
+        'no operational role can delete a domain row; supersession is the lifecycle';
+END
+$$;
+
+-- 25. The one deletion mechanism v1.2 DOES specify is modelled: artifact
+--     retention. Bulk content lives in object storage and is governed by a
+--     retention class and an optional expiry, two of whose classes exist to
+--     prevent removal. The lifecycle that acts on these is not implemented yet
+--     (ADR-0003); this asserts the contract it will act on has not drifted.
+--     [V12] artifact manifest
+DO $$
+DECLARE
+    classes text[];
+    coltype text;
+    nullable text;
+BEGIN
+    SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) INTO classes
+      FROM pg_enum e
+      JOIN pg_type ty ON ty.oid = e.enumtypid
+      JOIN pg_namespace n ON n.oid = ty.typnamespace
+     WHERE n.nspname = 'continuum' AND ty.typname = 'retention_class';
+
+    IF classes IS DISTINCT FROM
+       ARRAY['ephemeral','standard','durable','immutable','legal_hold'] THEN
+        RAISE EXCEPTION 'retention_class drifted from the v1.2 manifest: %', classes;
+    END IF;
+
+    SELECT c.data_type, c.is_nullable INTO coltype, nullable
+      FROM information_schema.columns c
+     WHERE c.table_schema = 'continuum' AND c.table_name = 'artifacts'
+       AND c.column_name = 'delete_after';
+    IF coltype IS DISTINCT FROM 'timestamp with time zone' OR nullable <> 'YES' THEN
+        RAISE EXCEPTION
+            'artifacts.delete_after must be a nullable timestamptz, got % (nullable %)',
+            coltype, nullable;
+    END IF;
+
+    -- legal_hold and immutable must be expressible without an expiry, or the
+    -- classes that exist to prevent deletion could not be represented.
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+         WHERE table_schema='continuum' AND table_name='artifacts'
+           AND column_name='retention_class' AND is_nullable='YES'
+    ) THEN
+        RAISE EXCEPTION 'artifacts.retention_class must be NOT NULL';
+    END IF;
+
+    RAISE NOTICE
+        'artifact retention contract intact: five v1.2 classes, nullable delete_after';
+END
+$$;
+
+-- 26. The event payload shape is closed, and fails closed.
+--
+--     v1.2 bans raw prompts, raw source bodies, full personal data,
+--     credentials, tokens, keys and private connector payloads from trace
+--     attributes. Traces expire; this chain does not, so the same content is
+--     kept out of events structurally. Three properties, each tested:
+--
+--       an unregistered event_type is rejected outright (opt-in catalogue);
+--       a registered type carrying an unregistered key is rejected;
+--       a registered type carrying only registered keys is accepted.
+--
+--     This closes the payload SHAPE. It cannot detect personal data inside a
+--     registered key -- nothing in SQL can -- but it makes the key set
+--     reviewed, bounded and testable. [DECISION: ADR-0004]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    accepted integer;
+BEGIN
+    -- 1. unregistered event type: fails closed
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), ws, 'UnregisteredEvent', 1, 'workspace',
+            ws, 'system', jsonb_build_object('note', 'x'), now()
+        );
+        RAISE EXCEPTION 'an unregistered event_type was accepted';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- 2. registered type, unregistered key: rejected. This is the smuggling
+    --    case -- the shape someone reaches for when they want the raw input
+    --    in the log for debugging.
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), ws, 'VerifyEvent', 1, 'workspace',
+            ws, 'system',
+            jsonb_build_object('note', 'ok', 'raw_prompt', 'who is alice bell'),
+            now()
+        );
+        RAISE EXCEPTION 'an unregistered payload key was accepted';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- 3. registered type, registered keys only: accepted, or the mechanism is
+    --    simply a wall and the assertion above proves nothing useful.
+    INSERT INTO continuum.events (
+        event_id, workspace_id, event_type, schema_version,
+        aggregate_type, aggregate_id, actor_type, payload, occurred_at
+    ) VALUES (
+        gen_random_uuid(), ws, 'VerifyEvent', 1, 'workspace',
+        ws, 'system', jsonb_build_object('note', 'well-formed'), now()
+    );
+    GET DIAGNOSTICS accepted = ROW_COUNT;
+    IF accepted <> 1 THEN
+        RAISE EXCEPTION 'a well-formed registered payload was not accepted';
+    END IF;
+
+    RAISE NOTICE
+        'event payload shape is closed: unregistered type and unregistered key rejected, well-formed accepted';
+END
+$$;
+
+-- 27. Bulk content cannot be inlined into an event at all. The registry closes
+--     the key set; this closes the volume, so a permitted key cannot become a
+--     smuggling channel for a document. Offload goes to an artifact and is
+--     referenced by payload_artifact_id. [DECISION: ADR-0004]
+DO $$
+DECLARE
+    bound integer;
+BEGIN
+    SELECT octet_length(repeat('x', 9000)) INTO bound;
+
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'VerifyEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('note', repeat('x', 9000)), now()
+        );
+        RAISE EXCEPTION 'a % byte payload was accepted inline', bound;
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- The bound must be the event-specific one, not the general 256 KiB rule:
+    -- events.payload carries the tighter domain.
+    IF NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'continuum' AND table_name = 'events'
+           AND column_name = 'payload' AND domain_name = 'jsonb_8k'
+    ) THEN
+        RAISE EXCEPTION
+            'events.payload does not carry the tightened event payload domain';
+    END IF;
+
+    RAISE NOTICE
+        'bulk content cannot be inlined into an event; offload is by reference';
+END
+$$;
+
+-- 28. The v1.2 retention schedule is applied, not remembered.
+--
+--     ephemeral 7 / standard 90 / durable 365 days; immutable and legal_hold
+--     are policy-defined and carry no timer. [V12]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    got integer;
+BEGIN
+    FOR got IN SELECT 1 LOOP EXIT; END LOOP;
+
+    -- each bounded class gets its scheduled expiry derived from created_at
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, producer_component, producer_version, created_at)
+    SELECT gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('a', 64),
+           'b', 'k/' || c::text, 'arn', 'internal', c, 'p', '1',
+           timestamptz '2026-01-01 00:00:00+00'
+      FROM unnest(ARRAY['ephemeral','standard','durable']::continuum.retention_class[]) AS c;
+
+    -- The expected dates are the LITERAL v1.2 numbers, not
+    -- artifact_retention_days() applied to itself. Deriving the expectation
+    -- from the function under test would let the schedule drift from v1.2
+    -- with both sides moving together -- an assertion that cannot fail.
+    SELECT count(*) INTO got
+      FROM continuum.artifacts
+     WHERE workspace_id = ws
+       AND created_at = timestamptz '2026-01-01 00:00:00+00'
+       AND delete_after = CASE retention_class
+               WHEN 'ephemeral' THEN timestamptz '2026-01-08 00:00:00+00'  -- +7
+               WHEN 'standard'  THEN timestamptz '2026-04-01 00:00:00+00'  -- +90
+               WHEN 'durable'   THEN timestamptz '2027-01-01 00:00:00+00'  -- +365
+           END;
+    IF got <> 3 THEN
+        RAISE EXCEPTION
+            'the v1.2 retention schedule (7/90/365) was not applied to % of 3 '
+            'bounded classes', 3 - got;
+    END IF;
+
+    -- a held class must not be given an expiry
+    BEGIN
+        INSERT INTO continuum.artifacts (
+            id, workspace_id, kind, media_type, byte_length, sha256,
+            storage_bucket, storage_key, kms_key_arn, classification,
+            retention_class, delete_after, producer_component, producer_version)
+        VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('b', 64),
+                'b', 'k/held', 'arn', 'internal', 'legal_hold',
+                now() + interval '1 day', 'p', '1');
+        RAISE EXCEPTION 'a legal_hold artifact was given an expiry';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- and a bounded class must not escape having one
+    BEGIN
+        INSERT INTO continuum.artifacts (
+            id, workspace_id, kind, media_type, byte_length, sha256,
+            storage_bucket, storage_key, kms_key_arn, classification,
+            retention_class, producer_component, producer_version)
+        VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('c', 64),
+                'b', 'k/unbounded', 'arn', 'internal', 'ephemeral', 'p', '1');
+        -- the trigger fills it in; forcing it back to NULL must be refused
+        UPDATE continuum.artifacts SET delete_after = NULL
+         WHERE storage_key = 'k/unbounded';
+        RAISE EXCEPTION 'a bounded artifact was left without an expiry';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    RAISE NOTICE
+        'v1.2 retention schedule applied: 7/90/365 derived, held classes carry no timer';
+END
+$$;
+
+-- 29. Retention can be strengthened, never weakened.
+--
+--     Without this the holds are advisory: an artifact under legal_hold cannot
+--     be deleted, but relabelling it 'ephemeral' and waiting seven days would
+--     achieve the same thing, and continuum_app holds UPDATE on artifacts.
+--     [DECISION: ADR-0005]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    held uuid := gen_random_uuid();
+BEGIN
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, producer_component, producer_version)
+    VALUES (held, ws, 'k', 'application/json', 1, repeat('d', 64),
+            'b', 'k/hold', 'arn', 'internal', 'legal_hold', 'p', '1');
+
+    BEGIN
+        UPDATE continuum.artifacts
+           SET retention_class = 'ephemeral', delete_after = now()
+         WHERE id = held;
+        RAISE EXCEPTION 'a legal_hold artifact was downgraded to ephemeral';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- strengthening stays available
+    UPDATE continuum.artifacts
+       SET retention_class = 'legal_hold'
+     WHERE storage_key = 'k/unbounded' AND retention_class = 'ephemeral';
+
+    RAISE NOTICE 'retention is a ratchet: downgrade rejected, upgrade allowed';
+END
+$$;
+
+-- 30. A lifecycle job cannot be handed something it may not delete.
+--
+--     The eligibility question is answered by the schema, not by the job: the
+--     view requires a delete_after, and no held artifact has one. A carelessly
+--     written job selecting from this view still cannot reach a hold.
+--     [DECISION: ADR-0005]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    due_expired integer;
+    due_held    integer;
+    due_future  integer;
+BEGIN
+    -- an expired bounded artifact
+    INSERT INTO continuum.artifacts (
+        id, workspace_id, kind, media_type, byte_length, sha256,
+        storage_bucket, storage_key, kms_key_arn, classification,
+        retention_class, delete_after, producer_component, producer_version)
+    VALUES (gen_random_uuid(), ws, 'k', 'application/json', 1, repeat('e', 64),
+            'b', 'k/expired', 'arn', 'internal', 'standard',
+            now() - interval '1 day', 'p', '1');
+
+    SELECT count(*) INTO due_expired
+      FROM continuum.artifacts_due_for_expiry WHERE storage_key = 'k/expired';
+    IF due_expired <> 1 THEN
+        RAISE EXCEPTION 'an expired artifact is not offered for expiry';
+    END IF;
+
+    SELECT count(*) INTO due_held
+      FROM continuum.artifacts_due_for_expiry
+     WHERE retention_class IN ('immutable', 'legal_hold');
+    IF due_held <> 0 THEN
+        RAISE EXCEPTION
+            '% held artifact(s) offered for expiry', due_held;
+    END IF;
+
+    SELECT count(*) INTO due_future
+      FROM continuum.artifacts_due_for_expiry WHERE delete_after > now();
+    IF due_future <> 0 THEN
+        RAISE EXCEPTION 'an unexpired artifact is offered for expiry';
+    END IF;
+
+    -- once recorded as removed it drops out, so a job cannot loop on it
+    UPDATE continuum.artifacts
+       SET content_deleted_at = now() WHERE storage_key = 'k/expired';
+    SELECT count(*) INTO due_expired
+      FROM continuum.artifacts_due_for_expiry WHERE storage_key = 'k/expired';
+    IF due_expired <> 0 THEN
+        RAISE EXCEPTION 'an artifact already expired is still offered';
+    END IF;
+
+    RAISE NOTICE
+        'expiry eligibility is structural: expired offered, held and unexpired never, removed drops out';
 END
 $$;
 

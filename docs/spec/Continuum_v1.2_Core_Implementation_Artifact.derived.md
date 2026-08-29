@@ -677,7 +677,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                               -- [V12] field
     actor_id            uuid,                                        -- [V12] field
     trace_id            char(32),                                    -- [V12] field
-    payload             continuum.jsonb_256k NOT NULL,               -- [V12] field, [V11] JSONB NOT NULL, [DERIVED] bound
+    payload             continuum.jsonb_8k NOT NULL,                 -- [V12] field, [V11] JSONB NOT NULL, [DECISION: ADR-0004] bound
     payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     previous_hash       char(64),                                    -- [V12] field
     event_hash          char(64) NOT NULL,                           -- [V12] field
@@ -722,6 +722,24 @@ CREATE TRIGGER events_append_only
     BEFORE UPDATE OR DELETE ON continuum.events
     FOR EACH ROW EXECUTE FUNCTION continuum.events_reject_mutation();
 ```
+
+### 4.1a Payload contract — references, not content
+
+v1.2 prohibits raw prompts, raw source bodies, full personal data, credentials,
+tokens, keys and private connector payloads from **trace attributes**. `[V12]`
+Traces expire; this chain does not, so the same content is kept out of events —
+structurally, not by convention. **Fixed by ADR-0004.** `[DECISION: ADR-0004]`
+
+| Mechanism | Effect |
+|---|---|
+| `continuum.event_schemas` | Registers `allowed_keys` per `(event_type, schema_version)`. An unregistered key is rejected. |
+| Fail closed | An `event_type` with no registered schema is rejected outright; the catalogue is opt-in. |
+| `continuum.jsonb_8k` | `events.payload` is bounded far below the general 256 KiB rule, so a permitted key cannot become a smuggling channel. |
+
+Content offloads to an artifact and is referenced by `payload_artifact_id`.
+This closes the payload *shape*; it cannot detect personal data inside a
+registered key, and ADR-0004 says so explicitly. The production event catalogue
+is deliberately not seeded — the registry ships empty.
 
 ### 4.2 Hash chain
 
@@ -830,6 +848,59 @@ than RLS. `[DECISION]`
 
 Because `continuum.current_workspace_id()` returns `NULL` when `app.workspace_id`
 is unset, every policy fails closed. `[V12]`
+
+### 4.3 Artifact retention
+
+v1.2 states the schedule directly, and reserves S3 Object Lock for the **audit
+bucket** alone, "only enabled after a specific retention/legal decision".
+Object Lock is therefore not the control that holds `immutable` and
+`legal_hold` artifacts — the manifest store is. `[V12]`
+
+| Class | Retention |
+|---|---|
+| `ephemeral` | 7 days |
+| `standard` | 90 days |
+| `durable` | 365 days |
+| `immutable` | policy-defined — no timer |
+| `legal_hold` | policy-defined — no timer |
+
+**Fixed by ADR-0005.** `[DECISION: ADR-0005]` The store applies the schedule
+(`artifacts_apply_retention` derives `delete_after` from `created_at`), refuses
+to weaken a class (`artifacts_retention_no_weakening` — otherwise a hold is
+advisory, since relabelling `legal_hold` to `ephemeral` would achieve deletion
+in seven days), requires held classes to carry no expiry, and answers
+eligibility itself through `continuum.artifacts_due_for_expiry`, which
+structurally cannot return a hold.
+
+Deletion means the **object**; the manifest row stays, with `content_deleted_at`
+recording that the content went. That column is store-side only: the v1.2
+manifest sets `additionalProperties: false`, so it cannot be a manifest field.
+
+---
+
+### 5.1 Table privileges — a grant is not a policy
+
+RLS constrains *which* rows a role may touch; it does not grant the privilege to
+touch any. Both are required, and the policies above are unreachable without the
+grants below. `[DERIVED]`
+
+| Role | Privileges |
+|---|---|
+| `continuum_app` | `SELECT, INSERT, UPDATE` on the 21 domain tables; `SELECT` on `workspaces`, `users`, `models`; `INSERT, SELECT` on `events` plus `USAGE` on its sequence. **Never `DELETE`.** |
+| `continuum_maintenance` | Schema `USAGE` only — no table privileges. |
+| `continuum_migration` | `USAGE, CREATE` on the schema. |
+
+**No role deletes a domain row.** `[DECISION: ADR-0003]` This follows the
+lifecycle §3 states rather than least privilege for its own sake: invalidation
+is stateful, `durable → invalidated → superseded_by`, and v1.2 says it
+*"preserves historical reasoning"*. Removal contradicts that.
+
+The deletion v1.2 *does* specify happens a layer down, on artifacts in object
+storage, through `retention_class` and `delete_after` — and two of the five
+classes, `immutable` and `legal_hold`, exist to prevent it. That lifecycle is not
+implemented; ADR-0003 records it, along with the open question of what may enter
+`events.payload`, which gates any erasure path at all. `[V12]` contract,
+`[DECISION: ADR-0003]` deferral.
 
 ---
 
@@ -1024,12 +1095,24 @@ Constraints these must satisfy, all `[V12]`:
    existing chains still verify. This was the highest-consequence item on the
    list; what made it urgent was not the layout but the fact that it could never
    be changed.
-2. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
-3. **Language dependency versions** (§6.2) — deliberately unpinned here.
-4. **`users` / `models` exemption from RLS** (§5).
-5. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
+2. ~~**Application deletion model** (§5.1)~~ — **RESOLVED by ADR-0003.** No
+   role deletes a domain row: v1.2 states invalidation and supersession as the
+   lifecycle, and specifies deletion only for artifacts in object storage via
+   `retention_class` / `delete_after`. That lifecycle, and the event-payload
+   question that gates erasure, are deferred by the ADR.
+3. ~~**Event payload contents** (§4.1a)~~ — **RESOLVED by ADR-0004.** Payloads
+   carry references, not content: a closed key set per event type, fail-closed
+   registration, and an 8 KiB bound. This was the decision gating any erasure
+   story, since the chain cannot be edited once written.
+4. ~~**Artifact retention enforcement** (§4.3)~~ — **RESOLVED by ADR-0005.**
+   The 7/90/365 schedule is applied by the store; held classes carry no timer,
+   cannot be downgraded, and cannot be offered to a deletion job.
+5. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
+6. **Language dependency versions** (§6.2) — deliberately unpinned here.
+7. **`users` / `models` exemption from RLS** (§5).
+8. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
    by every tenant under a dedicated read policy.
-6. **Role and function names** — already approved under ADR-0001.
+9. **Role and function names** — already approved under ADR-0001.
 
 **Complete enumeration.** The list below is generated from the
 `[DECISION]` tags in `continuum_v1.2_core_schema.derived.sql`, so it cannot

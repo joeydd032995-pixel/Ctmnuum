@@ -119,13 +119,30 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     than as the superuser: own rows visible, another tenant's rows not, a
     cross-tenant write rejected, built-in agents readable, and no rows at all
     when the tenant context is unset.
+24. No operational role can delete a domain row — the application role refused
+    behaviourally, and no *effective* `DELETE` (inherited or `PUBLIC` included)
+    for either operational role on any of the 25 tables.
+25. The artifact retention contract v1.2 specifies is intact: exactly the five
+    retention classes, a nullable `delete_after`, a `NOT NULL` retention class.
+26. The event payload shape is closed and fails closed: an unregistered
+    `event_type` rejected, an unregistered key rejected, a well-formed payload
+    accepted (ADR-0004).
+27. Bulk content cannot be inlined into an event; `events.payload` carries the
+    tightened 8 KiB domain.
+28. The v1.2 retention schedule (7 / 90 / 365 days) is applied to the bounded
+    classes; a held class cannot be given an expiry, a bounded class cannot
+    escape one (ADR-0005).
+29. Retention is a ratchet: a `legal_hold` artifact cannot be downgraded to
+    `ephemeral`; strengthening still works.
+30. Expiry eligibility is structural: an expired artifact is offered, held and
+    unexpired ones never are, and one already recorded as removed drops out.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–23 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–30 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -143,7 +160,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–23
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–30
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -307,11 +324,15 @@ privilege to touch any. Every other tenant policy was therefore unreachable —
 and a superuser-only test could never notice, because a superuser needs no
 grant.
 
-Table privileges are now granted explicitly. `[DECISION]`: no `DELETE` is
-granted anywhere, because v1.2 supersedes rather than deletes (`superseded_by`
-on claims and memories, promotion stages on mutations), so least privilege is
-the safer default for a security boundary until an ADR establishes a hard-delete
-path. `workspaces`, `users` and `models` are read-only to the application.
+Table privileges are now granted explicitly. The `DELETE` question that PR #8
+left open is settled by **ADR-0003**: `continuum_maintenance` holds
+`SELECT, DELETE` on the 21 domain tables and `continuum_app` never holds
+`DELETE`, so erasure is a separate auditable duty rather than ordinary
+application behaviour. Because the maintenance role is `NOBYPASSRLS` like every
+other role, a purge runs inside a tenant context and cannot sweep across
+workspaces. `events` and `workspaces` are explicitly revoked: the append-only
+trigger would reject either, and a grant that cannot be exercised reads as
+permission.
 
 Assertion 23 fails with `permission denied for table memories` if the grants are
 removed.
@@ -335,6 +356,216 @@ extracted from the schema file rather than retyped:
 | Table privileges revoked | `permission denied for table memories` |
 | Built-in agents dropped from the read policy | `built-in agents are invisible to a tenant under RLS` |
 | None (correct schema) | passes |
+
+## Fifth round: the deletion question was asked at the wrong layer
+
+The fourth round's grants raised an obvious follow-on — if the application must
+not delete, which role may? — and the answer taken was `continuum_maintenance`,
+on the reasoning that the three-way role split exists to express exactly that.
+Automated review then returned six findings on it, two P1, all correct: cascades
+from four parents cross the tenant boundary because PostgreSQL applies
+referential actions *without* evaluating the child's RLS policy; `NOBYPASSRLS`
+bounds each statement, not the session's choice of workspace; `runs` could not
+be purged at all; the assertion checked only direct grants; the ADR had not
+reached the primary artifact; and maintenance held global `SELECT` on `users`.
+
+Those were fixed. Then the prior question got asked — *is deletion required at
+all?* — and the answer changed the design.
+
+### v1.2 specifies a deletion model, and it is not row deletion
+
+| Data class | v1.2 position |
+|---|---|
+| Domain rows | *"Invalidation is stateful rather than deletion: `durable → invalidated → superseded_by → newer memory`. This preserves historical reasoning."* |
+| Artifacts | A retention lifecycle in object storage: `retention_class` (`ephemeral / standard / durable / immutable / legal_hold`) and a nullable `delete_after`. Two classes exist to *prevent* removal. |
+| Events | Append-only. Undeletable by construction. |
+
+So hard-deleting a memory or a claim contradicts a stated design principle
+rather than merely exceeding least privilege — and the one deletion mechanism
+v1.2 does call for operates a layer down and **is not implemented at all**. Two
+rounds went into hardening a grant for a capability the specification does not
+ask for, while the mechanism it does ask for had no lifecycle job and no
+assertion.
+
+### Row deletion would not have achieved erasure anyway
+
+The event store holds `payload jsonb` and cannot be deleted from. If personal
+data reaches an event payload, removing the `memories` row leaves the content in
+a ledger nothing can touch — the appearance of erasure without the substance.
+What may enter `events.payload` is an open `[DECISION]`; v1.2 names the column
+and never says. That decision gates every erasure story and is recorded in
+ADR-0003 rather than assumed away.
+
+The mechanism that fits this architecture is crypto-shredding: artifacts are
+SSE-KMS encrypted under a per-artifact `kms_key_arn`, so destroying the key
+renders content unrecoverable while the hash chain stays verifiable. It works
+*with* an append-only ledger. The supporting columns are already `[V12]`.
+
+### Outcome
+
+No operational role holds `DELETE`. `continuum_maintenance` returns to schema
+`USAGE` only — a privilege granted before a demonstrated need is one nobody has
+reasoned about. This also makes the cross-tenant cascade unreachable, since no
+role can initiate a cascading delete; that defect is still real and still worth
+fixing, but it is no longer load-bearing.
+
+| Configuration | Assertion result |
+|---|---|
+| `continuum_app` granted `DELETE` | `continuum_app deleted a domain row` |
+| `continuum_maintenance` granted `DELETE` | `holds effective DELETE … {continuum_maintenance.claims}` |
+| `DELETE` inherited via another role | `holds effective DELETE … {continuum_maintenance.runs}` |
+| A sixth `retention_class` added | `retention_class drifted from the v1.2 manifest` |
+| `delete_after` made `NOT NULL` | `must be a nullable timestamptz` |
+| `retention_class` made nullable | `must be NOT NULL` |
+| Correct configuration | passes |
+
+`delete_after` must stay nullable because `legal_hold` and `immutable` are
+exactly the classes with no expiry — a `NOT NULL` column would make the two
+anti-deletion classes unrepresentable.
+
+### What this round is really a record of
+
+The first four rounds found defects by executing. This one found a defect by
+asking whether the requirement existed. Every finding in the maintenance-role
+review was correct and worth fixing, and the whole structure being fixed should
+not have been built. Checking the specification for a stated position costs one
+grep; it was not done until prompted.
+
+## Sixth round: closing the payload, which gates erasure
+
+ADR-0003 deferred the question that gates every erasure story — may personal or
+sensitive data enter `events.payload`? v1.2 names the column and never says, but
+it does state the rule for a neighbouring sink: raw prompts, raw source bodies,
+full personal data, credentials, tokens, keys and private connector payloads are
+**prohibited trace attributes**.
+
+The asymmetry decides it. Traces expire; the event chain does not. Content too
+sensitive for a sink that ages out does not belong in a permanent, append-only,
+hash-chained one.
+
+### Reversible in one direction only
+
+Exclude content now and later need it → start including it going forward, per
+event type. Include content now and later need to exclude it → every event ever
+written is contaminated, in the one store that cannot be edited, because
+`previous_hash` chains each event to the last. Crypto-shredding does not rescue
+that case: it works for artifacts because each carries its own `kms_key_arn`,
+while `events.payload` is plain `jsonb`.
+
+ADR-0004 therefore fixes payloads as references, enforced three ways rather than
+documented once — a policy is not a control when the failure mode is somebody
+inlining a user's question at 2am for debugging:
+
+| Mechanism | Property |
+|---|---|
+| `continuum.event_schemas` | Closed key set per `(event_type, schema_version)` |
+| No registered schema → reject | The catalogue is opt-in, not opt-out |
+| `continuum.jsonb_8k` on `events.payload` | Bulk content cannot fit at all |
+
+### What it does not buy, stated plainly
+
+It closes the payload *shape*. It **cannot** detect personal data inside a
+registered key, and nothing in SQL can — a `note` field can still contain a
+name. The guarantee is narrower: the key set is reviewed rather than open, no
+field appears at runtime without a registry change, and volume is bounded.
+Misuse within an approved field is a review and classification problem.
+
+The production event catalogue is deliberately not seeded. Seeding a permissive
+starting set would defeat the fail-closed property immediately; the verification
+fixtures register their own types, which is the mechanism demonstrating itself.
+
+### The accepted cost
+
+The event store alone is no longer a complete replay log. Events prove sequence
+and integrity; reconstructing content needs the referenced stores. That is a
+real reduction in what event sourcing means here, taken deliberately — a log you
+can replay in full is a log you cannot erase from.
+
+| Configuration | Assertion result |
+|---|---|
+| Validation trigger dropped | `an unregistered event_type was accepted` |
+| Registry widened to permit `raw_prompt` | `an unregistered payload key was accepted` |
+| A catch-all type registered | `an unregistered event_type was accepted` |
+| Payload bound loosened to 256 KiB | `a 9000 byte payload was accepted inline` |
+| Correct configuration | passes |
+
+The second row is the exact move someone makes when they want the raw input in
+the log, and it fails. Assertion 26 also checks that a *well-formed* payload is
+accepted — without it, the first two rows would pass equally against a mechanism
+that simply rejects everything.
+
+### CI caught the registry escaping the RLS requirement
+
+The first push of ADR-0004 failed: `RLS not enabled/forced on: {event_schemas}`.
+Assertion 5 requires RLS on every table under `continuum` except an explicit
+exemption list, and a new table had been added without deciding which side of
+that line it sits on.
+
+The right answer was the exemption, not a policy: the registry is a global
+contract, and a per-tenant event catalogue would let one tenant declare types
+the validator applies differently for another. It holds type names and key
+names, no tenant data. The exemption is tagged `[DECISION: ADR-0004]` alongside
+`users` and `models` rather than added silently.
+
+Worth recording because the assertion did exactly its job — a new table cannot
+quietly escape the tenant-isolation requirement, which is the failure mode it
+was written for. The fix was verified in both directions: the exemption passes,
+and an ordinary unprotected table still fails.
+
+## Seventh round: making the retention schedule executable
+
+ADR-0003 named artifact retention as the one deletion mechanism v1.2 actually
+specifies, and noted that none of it was built. ADR-0005 builds it.
+
+v1.2 gives the schedule directly — `ephemeral` 7 days, `standard` 90,
+`durable` 365, `immutable` and `legal_hold` policy-defined — and, crucially,
+constrains where enforcement may live: **S3 Object Lock is reserved for the
+audit bucket**, "only enabled after a specific retention/legal decision". So
+Object Lock is not the control holding `immutable` and `legal_hold` artifacts.
+The manifest store is, and a schedule living only in a runbook is not
+enforcement.
+
+| Mechanism | Property |
+|---|---|
+| `artifacts_apply_retention` | Derives `delete_after` from `created_at` and the class |
+| `artifacts_retention_expiry_consistent` | Held classes carry no expiry; bounded ones must |
+| `artifacts_retention_no_weakening` | A class can be strengthened, never lowered |
+| `artifacts_due_for_expiry` | Eligibility answered by the schema; a hold cannot appear |
+| `content_deleted_at` | The object goes, the manifest row stays |
+
+The ratchet is the load-bearing part. A `legal_hold` artifact cannot be deleted
+— but nothing otherwise stops relabelling it `ephemeral` and waiting seven days,
+and `continuum_app` holds `UPDATE` on `artifacts`. Without the trigger the holds
+are advisory.
+
+### An assertion of mine was decorative, and negative testing caught it
+
+Assertion 28 originally computed its expected expiry dates by calling
+`continuum.artifact_retention_days()` — **the function under test**. Both sides
+moved together, so the schedule could drift from v1.2 while the assertion passed
+happily. Changing `ephemeral` from 7 days to 30 produced no failure.
+
+| Configuration | Result |
+|---|---|
+| `ephemeral` drifted 7 → 30 days | `the v1.2 retention schedule (7/90/365) was not applied to 1 of 3` |
+| `durable` drifted 365 → 400 days | same |
+| No-weakening trigger dropped | `a legal_hold artifact was downgraded to ephemeral` |
+| Consistency `CHECK` dropped | `a legal_hold artifact was given an expiry` |
+| View widened to ignore `content_deleted_at` | `an artifact already expired is still offered` |
+| Correct configuration | passes |
+
+The first two rows only exist because the defect was found by running the broken
+configuration rather than by reading the assertion. It now compares against the
+literal v1.2 dates. This is the same failure mode as `F-02`, in a file whose
+governing rule is that a test which cannot fail is a defect — which is why every
+assertion here is run against a deliberately broken schema before it is trusted.
+
+### What this does not do
+
+The lifecycle job is not written. Nothing yet reads `artifacts_due_for_expiry`,
+deletes the S3 object and sets `content_deleted_at`. ADR-0005 gives that job a
+contract it cannot violate; it does not implement it. The audit bucket's Object
+Lock decision is untouched, as v1.2 reserves it.
 
 ## What this package deliberately does not do
 

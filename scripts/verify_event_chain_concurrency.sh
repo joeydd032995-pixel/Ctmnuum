@@ -26,6 +26,13 @@ psql -v ON_ERROR_STOP=1 -q -c \
      VALUES ('${WORKSPACE}', 'concurrency-ws')
      ON CONFLICT (id) DO NOTHING;"
 
+# The event payload registry fails closed (ADR-0004), so this script registers
+# the type it writes rather than relying on the verify script having run first.
+psql -v ON_ERROR_STOP=1 -q -c \
+    "INSERT INTO continuum.event_schemas (event_type, schema_version, allowed_keys, description)
+     VALUES ('ConcurrentEvent', 1, ARRAY['n'], 'concurrent writer script')
+     ON CONFLICT (event_type, schema_version) DO NOTHING;"
+
 for ((n = 1; n <= EVENTS_PER_WRITER; n++)); do
     cat >> "$workdir/writer.sql" <<SQL
 INSERT INTO continuum.events (

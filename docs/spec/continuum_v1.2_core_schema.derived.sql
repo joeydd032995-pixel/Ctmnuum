@@ -31,6 +31,14 @@ CREATE EXTENSION IF NOT EXISTS citext;               -- [DECISION] case-insensit
 -- as a domain makes the rule structural instead of advisory: an oversized
 -- payload is rejected at write time rather than discovered later.
 -- [DERIVED] encoding; the rule is v1.2, the domain is not.
+-- [DECISION: ADR-0004] Event payloads are bounded far below the general
+-- >256 KiB offload rule. The event store is append-only and hash-chained: it is
+-- the one place a mistake cannot be corrected, so bulk content must go to an
+-- artifact and be referenced, not inlined. 8 KiB comfortably holds identifiers,
+-- a status, counters and a hash; it does not hold a document or a transcript.
+CREATE DOMAIN continuum.jsonb_8k AS jsonb
+    CHECK (VALUE IS NULL OR octet_length(VALUE::text) <= 8192);
+
 CREATE DOMAIN continuum.jsonb_256k AS jsonb
     CHECK (VALUE IS NULL OR octet_length(VALUE::text) <= 262144);
 
@@ -595,11 +603,37 @@ CREATE TABLE continuum.artifacts (
     classification      continuum.artifact_classification NOT NULL,   -- [V12]
     retention_class     continuum.retention_class NOT NULL,           -- [V12]
     delete_after        timestamptz,                                  -- [V12] nullable
+    -- [DECISION: ADR-0005] Store-side only. The v1.2 artifact manifest sets
+    -- additionalProperties:false, so this cannot be a manifest field; it records
+    -- that the OBJECT was expired from storage while the manifest row remains.
+    -- Retaining the row is deliberate: ADR-0003 keeps domain rows, and a row
+    -- pointing at removed content still truthfully records that the artifact
+    -- existed and when its content went. It is also what stops a lifecycle job
+    -- selecting the same artifact forever.
+    content_deleted_at  timestamptz,                                  -- [DECISION: ADR-0005]
     producer_component  text NOT NULL,                                -- [V12]
     producer_version    text NOT NULL,                                -- [V12]
     parent_artifact_ids uuid[] NOT NULL DEFAULT '{}',                 -- [V12]
     metadata            continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb,           -- [V12] [DERIVED bound]
-    created_at          timestamptz NOT NULL DEFAULT now()            -- [V12] required
+    created_at          timestamptz NOT NULL DEFAULT now(),           -- [V12] required
+    -- [DECISION: ADR-0005] The two classes that exist to prevent removal carry
+    -- no expiry; the three bounded classes must carry one. Written as an
+    -- explicit CASE rather than a boolean expression over NULLs: `delete_after
+    -- IS NULL` inside an OR would let a NULL make the whole CHECK NULL, and
+    -- CHECK rejects only FALSE. That exact three-valued trap has already been a
+    -- defect in this file once.
+    CONSTRAINT artifacts_retention_expiry_consistent CHECK (
+        CASE
+            WHEN retention_class IN ('immutable', 'legal_hold')
+                THEN delete_after IS NULL
+            ELSE delete_after IS NOT NULL
+        END
+    ),
+    -- Content cannot be recorded as expired before it was due to expire.
+    CONSTRAINT artifacts_expiry_precedes_removal CHECK (
+        content_deleted_at IS NULL
+        OR (delete_after IS NOT NULL AND content_deleted_at >= delete_after)
+    )
 );
 
 CREATE INDEX artifacts_sha_idx ON continuum.artifacts (workspace_id, sha256);  -- [DERIVED]
@@ -654,7 +688,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
     trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
-    payload             continuum.jsonb_256k NOT NULL,                               -- [V12 name] [V11 shape] [DERIVED bound]
+    payload             continuum.jsonb_8k NOT NULL,                                 -- [V12 name] [V11 shape] [DECISION: ADR-0004 bound]
     payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
     previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
     -- NOT NULL is retained: BEFORE ROW triggers fire before constraints are
@@ -693,6 +727,199 @@ CREATE INDEX events_workspace_sequence_idx
 -- value and the chain head are decided in one critical section. The sequence
 -- object itself is retained and still owned by the column.
 ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
+
+-- [DECISION: ADR-0004] Event payload shape registry.
+--
+-- v1.2 prohibits raw prompts, raw source bodies, full personal data,
+-- credentials, tokens, keys and private connector payloads from *trace*
+-- attributes. Traces expire; this chain does not. The same content is therefore
+-- kept out of events, and kept out structurally rather than by convention.
+--
+-- What this enforces and what it does not:
+--
+--   It CLOSES the payload shape. Every (event_type, schema_version) declares
+--   the keys it may carry, and an unregistered key is rejected. Nobody can
+--   smuggle a new field past review by writing it at runtime.
+--
+--   It FAILS CLOSED. An event_type with no registered schema is rejected
+--   outright, so the catalogue is opt-in rather than opt-out.
+--
+--   It does NOT detect personal data semantically. Nothing in SQL can. A
+--   registered key can still be filled with something it should not hold; what
+--   this buys is that the set of keys is reviewed, bounded and testable, and
+--   that bulk content cannot fit at all.
+--
+-- The production event catalogue is deliberately NOT seeded here. Naming the
+-- real event types is a larger decision than this ADR; the registry ships empty
+-- so that every type is registered deliberately. ADR-0004.
+CREATE TABLE continuum.event_schemas (
+    event_type     text NOT NULL,
+    schema_version integer NOT NULL,
+    allowed_keys   text[] NOT NULL
+        CHECK (cardinality(allowed_keys) > 0),
+    description    text,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_type, schema_version)
+);
+
+-- [DECISION: ADR-0004] Not workspace-scoped, and therefore exempt from the RLS
+-- requirement that covers every tenant table. The registry is a global contract:
+-- a per-tenant event catalogue would let one tenant declare types the validator
+-- applies differently for another. It holds type names and key names, no tenant
+-- data. Writes belong to continuum_migration; continuum_app needs no grant
+-- because events_check_payload reads it as SECURITY DEFINER.
+
+COMMENT ON TABLE continuum.event_schemas IS
+    'Closed key set per (event_type, schema_version). Events whose payload '
+    'carries an unregistered key, or whose type is unregistered, are rejected.';
+
+-- Named to sort before events_prepare_hash: PostgreSQL fires BEFORE triggers in
+-- name order, so validation runs first and a rejected event never consumes a
+-- sequence value or takes the chain lock.
+CREATE OR REPLACE FUNCTION continuum.events_check_payload()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, continuum
+AS $$
+DECLARE
+    permitted text[];
+    offending text[];
+BEGIN
+    SELECT s.allowed_keys INTO permitted
+      FROM continuum.event_schemas s
+     WHERE s.event_type = NEW.event_type
+       AND s.schema_version = NEW.schema_version;
+
+    IF permitted IS NULL THEN
+        RAISE EXCEPTION
+            'no registered payload schema for event_type % version %',
+            NEW.event_type, NEW.schema_version
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    SELECT array_agg(k) INTO offending
+      FROM jsonb_object_keys(NEW.payload) AS k
+     WHERE k <> ALL (permitted);
+
+    IF offending IS NOT NULL THEN
+        RAISE EXCEPTION
+            'event payload carries unregistered key(s) % for % version %',
+            offending, NEW.event_type, NEW.schema_version
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER events_check_payload
+    BEFORE INSERT ON continuum.events
+    FOR EACH ROW EXECUTE FUNCTION continuum.events_check_payload();
+
+-- ---------------------------------------------------------------------------
+-- Artifact retention                                                    [V12]
+-- ---------------------------------------------------------------------------
+--
+-- v1.2 states the initial retention schedule directly:
+--
+--     ephemeral    7 days        immutable   policy-defined
+--     standard    90 days        legal_hold  policy-defined
+--     durable    365 days
+--
+-- and reserves S3 Object Lock for the AUDIT bucket alone, "only enabled after a
+-- specific retention/legal decision". Object Lock is therefore not the control
+-- that holds immutable and legal_hold artifacts; this store is. What follows
+-- makes the schedule structural rather than a comment in a runbook.
+--
+-- Deletion here means the OBJECT in storage. The manifest row stays --
+-- ADR-0003 keeps domain rows, and a row recording that content existed and when
+-- it was expired is exactly the audit posture the rest of this schema takes.
+
+-- [V12] the schedule above. NULL means the class does not expire on a timer.
+CREATE OR REPLACE FUNCTION continuum.artifact_retention_days(
+    class continuum.retention_class)
+RETURNS integer
+LANGUAGE sql IMMUTABLE PARALLEL SAFE
+AS $$
+    SELECT CASE class
+        WHEN 'ephemeral' THEN 7
+        WHEN 'standard'  THEN 90
+        WHEN 'durable'   THEN 365
+        ELSE NULL           -- immutable, legal_hold: policy-defined, no timer
+    END;
+$$;
+
+-- [DECISION: ADR-0005] Derive delete_after from the class when the caller does
+-- not supply one, so the schedule is applied by default rather than remembered.
+-- A caller may still set an earlier or later date for a bounded class; what it
+-- may not do is give a held class an expiry, which the CHECK refuses.
+CREATE OR REPLACE FUNCTION continuum.artifacts_apply_retention()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    days integer := continuum.artifact_retention_days(NEW.retention_class);
+BEGIN
+    IF NEW.delete_after IS NULL AND days IS NOT NULL THEN
+        NEW.delete_after := NEW.created_at + make_interval(days => days);
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER artifacts_apply_retention
+    BEFORE INSERT ON continuum.artifacts
+    FOR EACH ROW EXECUTE FUNCTION continuum.artifacts_apply_retention();
+
+-- [DECISION: ADR-0005] Retention may be strengthened, never weakened.
+--
+-- This is the attack the schedule invites: an artifact under legal_hold cannot
+-- be deleted, but nothing stops a caller relabelling it 'ephemeral' and waiting
+-- seven days. continuum_app holds UPDATE on artifacts, so without this the hold
+-- is advisory.
+--
+-- The comparison relies on the declared order of continuum.retention_class,
+-- which assertion 25 pins to exactly the v1.2 list, so a reordering that would
+-- silently invert this check fails there first.
+--
+-- Lifting a hold is deliberately NOT expressible through the application: it
+-- requires the table owner, i.e. a migration, which is the auditable path.
+CREATE OR REPLACE FUNCTION continuum.artifacts_retention_no_weakening()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF NEW.retention_class < OLD.retention_class THEN
+        RAISE EXCEPTION
+            'retention cannot be weakened: % -> %',
+            OLD.retention_class, NEW.retention_class
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER artifacts_retention_no_weakening
+    BEFORE UPDATE ON continuum.artifacts
+    FOR EACH ROW EXECUTE FUNCTION continuum.artifacts_retention_no_weakening();
+
+-- [DECISION: ADR-0005] The question a lifecycle job asks, answered by the
+-- schema rather than by the job. A held artifact cannot appear here: the
+-- predicate requires a delete_after, and the CHECK guarantees immutable and
+-- legal_hold have none. A job that selects from this view cannot delete
+-- something it was not allowed to delete, even if it is written carelessly.
+CREATE OR REPLACE VIEW continuum.artifacts_due_for_expiry AS
+    SELECT id, workspace_id, storage_bucket, storage_key, storage_version_id,
+           retention_class, delete_after
+      FROM continuum.artifacts
+     WHERE delete_after IS NOT NULL
+       AND delete_after <= now()
+       AND content_deleted_at IS NULL;
+
+COMMENT ON VIEW continuum.artifacts_due_for_expiry IS
+    'Artifacts whose object may be removed from storage now. Structurally '
+    'cannot include immutable or legal_hold: those carry no delete_after.';
 
 -- [DERIVED] Server-side hash chain. v1.2 states that the previous_hash/
 -- event_hash chain "allows Continuum to detect silent modification of audit
@@ -910,12 +1137,26 @@ GRANT USAGE ON SCHEMA continuum TO continuum_app;
 -- that runs as a superuser would notice -- superusers bypass RLS entirely,
 -- FORCE included, so the predicates are never evaluated.
 --
--- [DECISION] No DELETE is granted anywhere. v1.2 supersedes rather than
--- deletes (`superseded_by` on claims and memories, promotion stages on
--- mutations), so least privilege is the safer default for a security boundary
--- until an ADR establishes a hard-delete path. workspaces, users and models are
--- read-only to the application: creating a tenant or registering a model is an
--- administrative act.
+-- [DECISION: ADR-0003] No role deletes domain rows. v1.2 is explicit that the
+-- memory lifecycle is stateful invalidation, not removal --
+--
+--     durable -> invalidated -> superseded_by -> newer memory
+--     "This preserves historical reasoning."
+--
+-- so hard deletion of a memory or a claim contradicts the stated design rather
+-- than merely exceeding least privilege. continuum_app therefore holds
+-- SELECT, INSERT, UPDATE and never DELETE, and continuum_maintenance holds no
+-- table privileges at all: there is no demonstrated need for one, and a
+-- privilege granted before a need is a privilege nobody has reasoned about.
+--
+-- The one deletion mechanism v1.2 does specify operates a layer down, on
+-- artifacts in object storage, through retention_class and delete_after (see
+-- continuum.artifacts). Two of its five classes -- immutable and legal_hold --
+-- exist to prevent removal. That lifecycle is not implemented here; ADR-0003
+-- records it as the work this decision defers to.
+--
+-- workspaces, users and models are read-only to the application: creating a
+-- tenant or registering a model is an administrative act.
 DO $$
 DECLARE
     t text;
