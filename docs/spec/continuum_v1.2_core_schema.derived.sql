@@ -736,6 +736,13 @@ CREATE TABLE continuum.event_schemas (
     PRIMARY KEY (event_type, schema_version)
 );
 
+-- [DECISION: ADR-0004] Not workspace-scoped, and therefore exempt from the RLS
+-- requirement that covers every tenant table. The registry is a global contract:
+-- a per-tenant event catalogue would let one tenant declare types the validator
+-- applies differently for another. It holds type names and key names, no tenant
+-- data. Writes belong to continuum_migration; continuum_app needs no grant
+-- because events_check_payload reads it as SECURITY DEFINER.
+
 COMMENT ON TABLE continuum.event_schemas IS
     'Closed key set per (event_type, schema_version). Events whose payload '
     'carries an unregistered key, or whose type is unregistered, are rejected.';

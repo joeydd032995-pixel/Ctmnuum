@@ -487,6 +487,24 @@ the log, and it fails. Assertion 26 also checks that a *well-formed* payload is
 accepted — without it, the first two rows would pass equally against a mechanism
 that simply rejects everything.
 
+### CI caught the registry escaping the RLS requirement
+
+The first push of ADR-0004 failed: `RLS not enabled/forced on: {event_schemas}`.
+Assertion 5 requires RLS on every table under `continuum` except an explicit
+exemption list, and a new table had been added without deciding which side of
+that line it sits on.
+
+The right answer was the exemption, not a policy: the registry is a global
+contract, and a per-tenant event catalogue would let one tenant declare types
+the validator applies differently for another. It holds type names and key
+names, no tenant data. The exemption is tagged `[DECISION: ADR-0004]` alongside
+`users` and `models` rather than added silently.
+
+Worth recording because the assertion did exactly its job — a new table cannot
+quietly escape the tenant-isolation requirement, which is the failure mode it
+was written for. The fix was verified in both directions: the exemption passes,
+and an ordinary unprotected table still fails.
+
 ## What this package deliberately does not do
 
 It **does not close `SRC-001`**. Issue #2's second close criterion requires

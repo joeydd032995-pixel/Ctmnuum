@@ -88,7 +88,12 @@ BEGIN
     JOIN pg_namespace n ON n.oid = c.relnamespace
     WHERE n.nspname='continuum'
       AND c.relkind='r'
-      AND c.relname NOT IN ('users','models')   -- [DECISION] not workspace-scoped
+      -- [DECISION] not workspace-scoped: users and models are global reference
+      -- data; event_schemas is a global contract registry (ADR-0004). A
+      -- per-tenant event catalogue would let one tenant declare types the
+      -- validator applies differently for another, which is the opposite of
+      -- what the registry is for.
+      AND c.relname NOT IN ('users','models','event_schemas')
       AND (c.relrowsecurity IS FALSE OR c.relforcerowsecurity IS FALSE);
     IF bad IS NOT NULL THEN
         RAISE EXCEPTION 'RLS not enabled/forced on: %', bad;
