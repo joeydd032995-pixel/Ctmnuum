@@ -677,7 +677,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                               -- [V12] field
     actor_id            uuid,                                        -- [V12] field
     trace_id            char(32),                                    -- [V12] field
-    payload             continuum.jsonb_256k NOT NULL,               -- [V12] field, [V11] JSONB NOT NULL, [DERIVED] bound
+    payload             continuum.jsonb_8k NOT NULL,                 -- [V12] field, [V11] JSONB NOT NULL, [DECISION: ADR-0004] bound
     payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     previous_hash       char(64),                                    -- [V12] field
     event_hash          char(64) NOT NULL,                           -- [V12] field
@@ -722,6 +722,24 @@ CREATE TRIGGER events_append_only
     BEFORE UPDATE OR DELETE ON continuum.events
     FOR EACH ROW EXECUTE FUNCTION continuum.events_reject_mutation();
 ```
+
+### 4.1a Payload contract — references, not content
+
+v1.2 prohibits raw prompts, raw source bodies, full personal data, credentials,
+tokens, keys and private connector payloads from **trace attributes**. `[V12]`
+Traces expire; this chain does not, so the same content is kept out of events —
+structurally, not by convention. **Fixed by ADR-0004.** `[DECISION: ADR-0004]`
+
+| Mechanism | Effect |
+|---|---|
+| `continuum.event_schemas` | Registers `allowed_keys` per `(event_type, schema_version)`. An unregistered key is rejected. |
+| Fail closed | An `event_type` with no registered schema is rejected outright; the catalogue is opt-in. |
+| `continuum.jsonb_8k` | `events.payload` is bounded far below the general 256 KiB rule, so a permitted key cannot become a smuggling channel. |
+
+Content offloads to an artifact and is referenced by `payload_artifact_id`.
+This closes the payload *shape*; it cannot detect personal data inside a
+registered key, and ADR-0004 says so explicitly. The production event catalogue
+is deliberately not seeded — the registry ships empty.
 
 ### 4.2 Hash chain
 
@@ -1053,12 +1071,16 @@ Constraints these must satisfy, all `[V12]`:
    lifecycle, and specifies deletion only for artifacts in object storage via
    `retention_class` / `delete_after`. That lifecycle, and the event-payload
    question that gates erasure, are deferred by the ADR.
-3. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
-4. **Language dependency versions** (§6.2) — deliberately unpinned here.
-5. **`users` / `models` exemption from RLS** (§5).
-6. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
+3. ~~**Event payload contents** (§4.1a)~~ — **RESOLVED by ADR-0004.** Payloads
+   carry references, not content: a closed key set per event type, fail-closed
+   registration, and an 8 KiB bound. This was the decision gating any erasure
+   story, since the chain cannot be edited once written.
+4. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
+5. **Language dependency versions** (§6.2) — deliberately unpinned here.
+6. **`users` / `models` exemption from RLS** (§5).
+7. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
    by every tenant under a dedicated read policy.
-7. **Role and function names** — already approved under ADR-0001.
+8. **Role and function names** — already approved under ADR-0001.
 
 **Complete enumeration.** The list below is generated from the
 `[DECISION]` tags in `continuum_v1.2_core_schema.derived.sql`, so it cannot

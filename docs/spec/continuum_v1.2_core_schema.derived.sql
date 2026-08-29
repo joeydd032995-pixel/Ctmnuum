@@ -31,6 +31,14 @@ CREATE EXTENSION IF NOT EXISTS citext;               -- [DECISION] case-insensit
 -- as a domain makes the rule structural instead of advisory: an oversized
 -- payload is rejected at write time rather than discovered later.
 -- [DERIVED] encoding; the rule is v1.2, the domain is not.
+-- [DECISION: ADR-0004] Event payloads are bounded far below the general
+-- >256 KiB offload rule. The event store is append-only and hash-chained: it is
+-- the one place a mistake cannot be corrected, so bulk content must go to an
+-- artifact and be referenced, not inlined. 8 KiB comfortably holds identifiers,
+-- a status, counters and a hash; it does not hold a document or a transcript.
+CREATE DOMAIN continuum.jsonb_8k AS jsonb
+    CHECK (VALUE IS NULL OR octet_length(VALUE::text) <= 8192);
+
 CREATE DOMAIN continuum.jsonb_256k AS jsonb
     CHECK (VALUE IS NULL OR octet_length(VALUE::text) <= 262144);
 
@@ -654,7 +662,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
     trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
-    payload             continuum.jsonb_256k NOT NULL,                               -- [V12 name] [V11 shape] [DERIVED bound]
+    payload             continuum.jsonb_8k NOT NULL,                                 -- [V12 name] [V11 shape] [DECISION: ADR-0004 bound]
     payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
     previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
     -- NOT NULL is retained: BEFORE ROW triggers fire before constraints are
@@ -693,6 +701,88 @@ CREATE INDEX events_workspace_sequence_idx
 -- value and the chain head are decided in one critical section. The sequence
 -- object itself is retained and still owned by the column.
 ALTER TABLE continuum.events ALTER COLUMN sequence DROP DEFAULT;
+
+-- [DECISION: ADR-0004] Event payload shape registry.
+--
+-- v1.2 prohibits raw prompts, raw source bodies, full personal data,
+-- credentials, tokens, keys and private connector payloads from *trace*
+-- attributes. Traces expire; this chain does not. The same content is therefore
+-- kept out of events, and kept out structurally rather than by convention.
+--
+-- What this enforces and what it does not:
+--
+--   It CLOSES the payload shape. Every (event_type, schema_version) declares
+--   the keys it may carry, and an unregistered key is rejected. Nobody can
+--   smuggle a new field past review by writing it at runtime.
+--
+--   It FAILS CLOSED. An event_type with no registered schema is rejected
+--   outright, so the catalogue is opt-in rather than opt-out.
+--
+--   It does NOT detect personal data semantically. Nothing in SQL can. A
+--   registered key can still be filled with something it should not hold; what
+--   this buys is that the set of keys is reviewed, bounded and testable, and
+--   that bulk content cannot fit at all.
+--
+-- The production event catalogue is deliberately NOT seeded here. Naming the
+-- real event types is a larger decision than this ADR; the registry ships empty
+-- so that every type is registered deliberately. ADR-0004.
+CREATE TABLE continuum.event_schemas (
+    event_type     text NOT NULL,
+    schema_version integer NOT NULL,
+    allowed_keys   text[] NOT NULL
+        CHECK (cardinality(allowed_keys) > 0),
+    description    text,
+    created_at     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (event_type, schema_version)
+);
+
+COMMENT ON TABLE continuum.event_schemas IS
+    'Closed key set per (event_type, schema_version). Events whose payload '
+    'carries an unregistered key, or whose type is unregistered, are rejected.';
+
+-- Named to sort before events_prepare_hash: PostgreSQL fires BEFORE triggers in
+-- name order, so validation runs first and a rejected event never consumes a
+-- sequence value or takes the chain lock.
+CREATE OR REPLACE FUNCTION continuum.events_check_payload()
+RETURNS trigger
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog, continuum
+AS $$
+DECLARE
+    permitted text[];
+    offending text[];
+BEGIN
+    SELECT s.allowed_keys INTO permitted
+      FROM continuum.event_schemas s
+     WHERE s.event_type = NEW.event_type
+       AND s.schema_version = NEW.schema_version;
+
+    IF permitted IS NULL THEN
+        RAISE EXCEPTION
+            'no registered payload schema for event_type % version %',
+            NEW.event_type, NEW.schema_version
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    SELECT array_agg(k) INTO offending
+      FROM jsonb_object_keys(NEW.payload) AS k
+     WHERE k <> ALL (permitted);
+
+    IF offending IS NOT NULL THEN
+        RAISE EXCEPTION
+            'event payload carries unregistered key(s) % for % version %',
+            offending, NEW.event_type, NEW.schema_version
+            USING ERRCODE = 'check_violation';
+    END IF;
+
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER events_check_payload
+    BEFORE INSERT ON continuum.events
+    FOR EACH ROW EXECUTE FUNCTION continuum.events_check_payload();
 
 -- [DERIVED] Server-side hash chain. v1.2 states that the previous_hash/
 -- event_hash chain "allows Continuum to detect silent modification of audit

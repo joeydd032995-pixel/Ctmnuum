@@ -97,6 +97,16 @@ BEGIN
 END
 $$;
 
+-- Test event types. The registry ships empty and fails closed (ADR-0004), so
+-- every type these assertions write must be registered first. That the fixtures
+-- have to exist at all is the mechanism working.
+INSERT INTO continuum.event_schemas (event_type, schema_version, allowed_keys, description)
+VALUES
+    ('VerifyEvent',     1, ARRAY['note'],       'append-only checks'),
+    ('OversizeEvent',   1, ARRAY['blob'],       'payload bound check'),
+    ('ChainEvent',      1, ARRAY['seq'],        'hash chain ordering'),
+    ('ForgedEvent',     1, ARRAY['note'],       'forged previous_hash check');
+
 -- 6. Event store rejects UPDATE and DELETE                             [V12]
 INSERT INTO continuum.workspaces (id, name)
 VALUES ('00000000-0000-0000-0000-0000000000aa', 'verify-ws');
@@ -312,7 +322,8 @@ BEGIN
 END
 $$;
 
--- 14. The >256 KiB offload rule is enforced by the type, not by convention  [V12]
+-- 14. The event payload bound is enforced by the type, not by convention
+--     [V12] offload rule, [DECISION: ADR-0004] the 8 KiB event bound
 DO $$
 BEGIN
     BEGIN
@@ -325,7 +336,7 @@ BEGIN
             '00000000-0000-0000-0000-0000000000aa', 'system',
             jsonb_build_object('blob', repeat('x', 300000)), now()
         );
-        RAISE EXCEPTION 'a >256 KiB payload was accepted inline';
+        RAISE EXCEPTION 'an oversized payload was accepted inline';
     EXCEPTION WHEN check_violation THEN
         RAISE NOTICE 'oversized JSONB payload rejected: enforced';
     END;
@@ -777,6 +788,118 @@ BEGIN
 
     RAISE NOTICE
         'artifact retention contract intact: five v1.2 classes, nullable delete_after';
+END
+$$;
+
+-- 26. The event payload shape is closed, and fails closed.
+--
+--     v1.2 bans raw prompts, raw source bodies, full personal data,
+--     credentials, tokens, keys and private connector payloads from trace
+--     attributes. Traces expire; this chain does not, so the same content is
+--     kept out of events structurally. Three properties, each tested:
+--
+--       an unregistered event_type is rejected outright (opt-in catalogue);
+--       a registered type carrying an unregistered key is rejected;
+--       a registered type carrying only registered keys is accepted.
+--
+--     This closes the payload SHAPE. It cannot detect personal data inside a
+--     registered key -- nothing in SQL can -- but it makes the key set
+--     reviewed, bounded and testable. [DECISION: ADR-0004]
+DO $$
+DECLARE
+    ws constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    accepted integer;
+BEGIN
+    -- 1. unregistered event type: fails closed
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), ws, 'UnregisteredEvent', 1, 'workspace',
+            ws, 'system', jsonb_build_object('note', 'x'), now()
+        );
+        RAISE EXCEPTION 'an unregistered event_type was accepted';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- 2. registered type, unregistered key: rejected. This is the smuggling
+    --    case -- the shape someone reaches for when they want the raw input
+    --    in the log for debugging.
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), ws, 'VerifyEvent', 1, 'workspace',
+            ws, 'system',
+            jsonb_build_object('note', 'ok', 'raw_prompt', 'who is alice bell'),
+            now()
+        );
+        RAISE EXCEPTION 'an unregistered payload key was accepted';
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- 3. registered type, registered keys only: accepted, or the mechanism is
+    --    simply a wall and the assertion above proves nothing useful.
+    INSERT INTO continuum.events (
+        event_id, workspace_id, event_type, schema_version,
+        aggregate_type, aggregate_id, actor_type, payload, occurred_at
+    ) VALUES (
+        gen_random_uuid(), ws, 'VerifyEvent', 1, 'workspace',
+        ws, 'system', jsonb_build_object('note', 'well-formed'), now()
+    );
+    GET DIAGNOSTICS accepted = ROW_COUNT;
+    IF accepted <> 1 THEN
+        RAISE EXCEPTION 'a well-formed registered payload was not accepted';
+    END IF;
+
+    RAISE NOTICE
+        'event payload shape is closed: unregistered type and unregistered key rejected, well-formed accepted';
+END
+$$;
+
+-- 27. Bulk content cannot be inlined into an event at all. The registry closes
+--     the key set; this closes the volume, so a permitted key cannot become a
+--     smuggling channel for a document. Offload goes to an artifact and is
+--     referenced by payload_artifact_id. [DECISION: ADR-0004]
+DO $$
+DECLARE
+    bound integer;
+BEGIN
+    SELECT octet_length(repeat('x', 9000)) INTO bound;
+
+    BEGIN
+        INSERT INTO continuum.events (
+            event_id, workspace_id, event_type, schema_version,
+            aggregate_type, aggregate_id, actor_type, payload, occurred_at
+        ) VALUES (
+            gen_random_uuid(), '00000000-0000-0000-0000-0000000000aa',
+            'VerifyEvent', 1, 'workspace',
+            '00000000-0000-0000-0000-0000000000aa', 'system',
+            jsonb_build_object('note', repeat('x', 9000)), now()
+        );
+        RAISE EXCEPTION 'a % byte payload was accepted inline', bound;
+    EXCEPTION WHEN check_violation THEN
+        NULL;
+    END;
+
+    -- The bound must be the event-specific one, not the general 256 KiB rule:
+    -- events.payload carries the tighter domain.
+    IF NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'continuum' AND table_name = 'events'
+           AND column_name = 'payload' AND domain_name = 'jsonb_8k'
+    ) THEN
+        RAISE EXCEPTION
+            'events.payload does not carry the tightened event payload domain';
+    END IF;
+
+    RAISE NOTICE
+        'bulk content cannot be inlined into an event; offload is by reference';
 END
 $$;
 

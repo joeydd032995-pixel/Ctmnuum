@@ -101,8 +101,10 @@ an answer.
 1. **Artifact retention enforcement** — honouring `delete_after`, and making
    `immutable` and `legal_hold` block removal. This is the deletion mechanism
    v1.2 specifies and none of it is built.
-2. **Event payload policy** — whether personal data may enter `events.payload`.
-   Gates every erasure story.
+2. ~~**Event payload policy**~~ — **RESOLVED by ADR-0004.** Payloads carry
+   references, not content: a closed key set per event type, fail-closed
+   registration, and an 8 KiB bound. Erasure is now possible without touching
+   the chain — erase the referent, and the event survives with its hash valid.
 3. **Erasure mechanism** — crypto-shredding versus another approach, once (2) is
    settled.
 4. **Workspace teardown** — deleting a tenant cascades into the append-only

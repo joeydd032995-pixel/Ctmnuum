@@ -124,13 +124,18 @@ Assertions in `continuum_v1.2_core_schema.derived.verify.sql`:
     for either operational role on any of the 25 tables.
 25. The artifact retention contract v1.2 specifies is intact: exactly the five
     retention classes, a nullable `delete_after`, a `NOT NULL` retention class.
+26. The event payload shape is closed and fails closed: an unregistered
+    `event_type` rejected, an unregistered key rejected, a well-formed payload
+    accepted (ADR-0004).
+27. Bulk content cannot be inlined into an event; `events.payload` carries the
+    tightened 8 KiB domain.
 
 Plus a concurrent-writer test that cannot be expressed in a single psql script:
 `scripts/verify_event_chain_concurrency.sh` runs four writers inserting into one
 workspace as separate autocommit statements and asserts the chain is intact in
 `sequence` order.
 
-Assertions 6–25 are the point of the exercise. v1.2 states these as hard gates
+Assertions 6–27 are the point of the exercise. v1.2 states these as hard gates
 in prose; the reconstruction turns them into database constraints that fail
 loudly rather than depending on application code to remember.
 
@@ -148,7 +153,7 @@ accepts that row. The derived composite constraint rejects it.
 - `.github/workflows/derived-core-schema.yml`
 
 ### FND-SPEC-G3 — invariants enforced by the schema
-- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–25
+- `docs/spec/continuum_v1.2_core_schema.derived.verify.sql` assertions 4–27
 - `scripts/verify_event_chain_concurrency.sh` — concurrent-writer chain integrity
 
 ### FND-SPEC-G4 — decisions enumerated, gap not silently closed
@@ -418,6 +423,69 @@ asking whether the requirement existed. Every finding in the maintenance-role
 review was correct and worth fixing, and the whole structure being fixed should
 not have been built. Checking the specification for a stated position costs one
 grep; it was not done until prompted.
+
+## Sixth round: closing the payload, which gates erasure
+
+ADR-0003 deferred the question that gates every erasure story — may personal or
+sensitive data enter `events.payload`? v1.2 names the column and never says, but
+it does state the rule for a neighbouring sink: raw prompts, raw source bodies,
+full personal data, credentials, tokens, keys and private connector payloads are
+**prohibited trace attributes**.
+
+The asymmetry decides it. Traces expire; the event chain does not. Content too
+sensitive for a sink that ages out does not belong in a permanent, append-only,
+hash-chained one.
+
+### Reversible in one direction only
+
+Exclude content now and later need it → start including it going forward, per
+event type. Include content now and later need to exclude it → every event ever
+written is contaminated, in the one store that cannot be edited, because
+`previous_hash` chains each event to the last. Crypto-shredding does not rescue
+that case: it works for artifacts because each carries its own `kms_key_arn`,
+while `events.payload` is plain `jsonb`.
+
+ADR-0004 therefore fixes payloads as references, enforced three ways rather than
+documented once — a policy is not a control when the failure mode is somebody
+inlining a user's question at 2am for debugging:
+
+| Mechanism | Property |
+|---|---|
+| `continuum.event_schemas` | Closed key set per `(event_type, schema_version)` |
+| No registered schema → reject | The catalogue is opt-in, not opt-out |
+| `continuum.jsonb_8k` on `events.payload` | Bulk content cannot fit at all |
+
+### What it does not buy, stated plainly
+
+It closes the payload *shape*. It **cannot** detect personal data inside a
+registered key, and nothing in SQL can — a `note` field can still contain a
+name. The guarantee is narrower: the key set is reviewed rather than open, no
+field appears at runtime without a registry change, and volume is bounded.
+Misuse within an approved field is a review and classification problem.
+
+The production event catalogue is deliberately not seeded. Seeding a permissive
+starting set would defeat the fail-closed property immediately; the verification
+fixtures register their own types, which is the mechanism demonstrating itself.
+
+### The accepted cost
+
+The event store alone is no longer a complete replay log. Events prove sequence
+and integrity; reconstructing content needs the referenced stores. That is a
+real reduction in what event sourcing means here, taken deliberately — a log you
+can replay in full is a log you cannot erase from.
+
+| Configuration | Assertion result |
+|---|---|
+| Validation trigger dropped | `an unregistered event_type was accepted` |
+| Registry widened to permit `raw_prompt` | `an unregistered payload key was accepted` |
+| A catch-all type registered | `an unregistered event_type was accepted` |
+| Payload bound loosened to 256 KiB | `a 9000 byte payload was accepted inline` |
+| Correct configuration | passes |
+
+The second row is the exact move someone makes when they want the raw input in
+the log, and it fails. Assertion 26 also checks that a *well-formed* payload is
+accepted — without it, the first two rows would pass equally against a mechanism
+that simply rejects everything.
 
 ## What this package deliberately does not do
 
