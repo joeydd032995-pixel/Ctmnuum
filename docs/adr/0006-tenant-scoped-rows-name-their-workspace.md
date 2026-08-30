@@ -145,9 +145,16 @@ PostgreSQL 18 + pgvector in CI:
   matters: it first proves the premise (B cannot see A's run), then proves the
   reference is refused. Assertion 31 runs as the owner, where RLS is never
   evaluated.
-- **33** — structural. No foreign key in the schema names a tenant-scoped parent
-  by `id` alone. This is the only one of the three that constrains a foreign key
-  nobody has written yet.
+- **33** — structural. Every foreign key in the schema ties the child's own
+  `workspace_id` to the parent's, **matched by ordinal**. This is the only one
+  of the three that constrains a foreign key nobody has written yet.
+
+  The ordinal match is not pedantry. Asking merely whether the parent's
+  `workspace_id` appears somewhere in `confkey` accepts
+  `FOREIGN KEY (id, run_id) REFERENCES continuum.runs (workspace_id, id)`,
+  which a caller satisfies by putting another tenant's workspace UUID in `id`.
+  Reproduced: with that constraint in place, `continuum_app` scoped to
+  workspace B inserted a `cost_events` row referencing workspace A's run.
 - **34** — `workspace_id` is `NOT NULL` on every base table carrying it.
 - **35** — a parent delete nulls `run_id` and leaves `workspace_id` intact.
 
@@ -158,11 +165,16 @@ fail before being trusted:
 |---|---|
 | `agent_versions.agent_id` reverted to a single-column FK | 31 — `cross-workspace parent reference was accepted on a cascading FK` |
 | `failures.run_id` reverted to a single-column FK | 32 — `continuum_app referenced another workspace's run through the RI bypass` |
-| An unqualified FK added by a later `ALTER TABLE` | 33 — `foreign key(s) naming a tenant-scoped parent by id alone: continuum.cost_events.bad_fk -> continuum.runs` |
+| An unqualified FK added by a later `ALTER TABLE` | 33 — `foreign key(s) not tying the child workspace_id to the parent's: continuum.cost_events.bad_fk -> continuum.runs` |
+| An FK naming the parent's `workspace_id` from the child's `id` | 33 — `... continuum.cost_events.cost_events_swapped_fk -> continuum.runs` |
 | `tools.workspace_id` made nullable again | 34 — `workspace_id is nullable on: tools` |
 | `SET NULL` written without its column list | 35 — `ON DELETE SET NULL tried to null workspace_id: the constraint is missing its column list` |
 | `CASCADE` written in place of `SET NULL` | 35 — `the child row did not survive its parent; SET NULL behaved as CASCADE` |
 | The `IS NULL` disjunct restored to a read policy | 13 — `policy admits a workspace-less row: agents.agents_read` |
+
+Assertion 33's ordinal match was added in review: the first version tested
+membership, and Codex found the swapped-ordinal constraint that satisfies it
+while leaving the hole open. The finding was reproduced before it was fixed.
 
 Assertion 35 was rewritten because of what its first negative control showed:
 the bare `SET NULL` does not produce a wrongly-nulled row, it produces a

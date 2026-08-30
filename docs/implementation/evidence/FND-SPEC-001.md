@@ -645,7 +645,7 @@ files on `pgvector/pgvector:0.8.6-pg18-trixie`.
 | *(none — baseline)* | `PASSED` |
 | `agent_versions.agent_id` → single-column FK | **31** `cross-workspace parent reference was accepted on a cascading FK` |
 | `failures.run_id` → single-column FK | **32** `continuum_app referenced another workspace's run through the RI bypass` |
-| `ALTER TABLE ... ADD CONSTRAINT bad_fk FOREIGN KEY (run_id) REFERENCES continuum.runs (id)` | **33** `foreign key(s) naming a tenant-scoped parent by id alone: continuum.cost_events.bad_fk -> continuum.runs` |
+| `ALTER TABLE ... ADD CONSTRAINT bad_fk FOREIGN KEY (run_id) REFERENCES continuum.runs (id)` | **33** `foreign key(s) not tying the child workspace_id to the parent's: continuum.cost_events.bad_fk -> continuum.runs` |
 | `ALTER TABLE continuum.tools ALTER COLUMN workspace_id DROP NOT NULL` | **34** `workspace_id is nullable on: tools` |
 | `SET NULL` without its column list | **35** `ON DELETE SET NULL tried to null workspace_id: the constraint is missing its column list` |
 | `CASCADE` in place of `SET NULL` | **35** `the child row did not survive its parent; SET NULL behaved as CASCADE` |
@@ -659,6 +659,43 @@ an offender, because a view's columns are always reported nullable. It reads
 Assertion 33 caught one leftover on first run — `memory_embeddings_memory_id_fkey`,
 the single-column FK inside the block reproduced verbatim from v1.2. It is
 dropped outside that block, so the reproduced text stays unmodified.
+
+### Review round: two findings from Codex, both accepted
+
+**Assertion 33 tested membership, not correspondence.** It asked whether the
+parent's `workspace_id` appeared anywhere in the referenced column list. That
+accepts a constraint which names it from the wrong child column:
+
+```sql
+FOREIGN KEY (id, run_id) REFERENCES continuum.runs (workspace_id, id)
+```
+
+Reproduced before fixing. With that constraint in place the assertion reported
+no offenders, and `continuum_app` scoped to workspace B successfully inserted a
+`cost_events` row referencing workspace A's run — by putting A's workspace UUID
+in `id`. The check now walks `confkey` with ordinality and requires the child
+column at the same position to be `workspace_id`. Both mutations — the
+single-column FK and the swapped-ordinal one — now fail it, and the message was
+reworded, since "names its parent by id alone" did not describe the second case.
+
+This is the third assertion of mine in this package to survive my own review and
+fail only under a mutation nobody had tried. The pattern is consistent: an
+assertion that queries *for the presence of the right thing* tends to pass on
+schemas that contain the right thing in the wrong place.
+
+**The companion document still described the pre-fix schema.** `[V12]` and
+`[V11]` snippets throughout §3 showed `run_id uuid REFERENCES continuum.runs(id)`
+and nullable `workspace_id` columns — the exact shape ADR-0006 removes. Anyone
+implementing from the document rather than the SQL would have rebuilt the
+vulnerability. Nineteen foreign keys and seven `workspace_id` columns across the
+document were corrected, the eight parent snippets gained
+`UNIQUE (workspace_id, id)`, and §3 now states plainly that the SQL file is
+authoritative and these excerpts are abridged.
+
+The `memory_embeddings` block is deliberately still wrong, and now says so: it
+is reproduced verbatim from v1.2, its two independent single-column keys *are*
+the defect §5 describes, and the schema closes it outside the block so the
+reproduced text stays unmodified.
 
 ### What CI must still show
 

@@ -1185,15 +1185,31 @@ BEGIN
            SELECT 1 FROM pg_attribute pa
             WHERE pa.attrelid = c.confrelid AND pa.attname = 'workspace_id'
               AND pa.attnum > 0 AND NOT pa.attisdropped)
-       -- ...and this constraint does not name it
+       -- ...and this constraint does not tie the child's own workspace_id to it.
+       --
+       -- Matching by ordinal, not by membership. Asking only whether the parent's
+       -- workspace_id appears somewhere in confkey accepts a constraint that
+       -- names it from the wrong child column:
+       --
+       --     FOREIGN KEY (id, run_id) REFERENCES continuum.runs (workspace_id, id)
+       --
+       -- which is satisfied by putting another tenant's workspace UUID in `id`,
+       -- and leaves the cross-tenant reference wide open. The child column at the
+       -- position where the parent names workspace_id must be workspace_id too.
        AND NOT EXISTS (
-           SELECT 1 FROM pg_attribute pa
-            WHERE pa.attrelid = c.confrelid AND pa.attname = 'workspace_id'
-              AND pa.attnum = ANY (c.confkey));
+           SELECT 1
+             FROM unnest(c.confkey) WITH ORDINALITY AS parent(attnum, ord)
+             JOIN pg_attribute pa
+               ON pa.attrelid = c.confrelid AND pa.attnum = parent.attnum
+             JOIN pg_attribute ca
+               ON ca.attrelid = c.conrelid AND ca.attnum = c.conkey[parent.ord]
+            WHERE pa.attname = 'workspace_id'
+              AND ca.attname = 'workspace_id');
 
     IF offenders IS NOT NULL THEN
         RAISE EXCEPTION
-            'foreign key(s) naming a tenant-scoped parent by id alone: %', offenders;
+            'foreign key(s) not tying the child workspace_id to the parent''s: %',
+            offenders;
     END IF;
     RAISE NOTICE
         'every foreign key to a tenant-scoped parent is qualified by workspace_id';
