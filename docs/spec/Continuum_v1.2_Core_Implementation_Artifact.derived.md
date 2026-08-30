@@ -213,20 +213,28 @@ CREATE INDEX runs_workspace_created_idx
 ```sql
 CREATE TABLE continuum.agents (
     id            uuid PRIMARY KEY,                                  -- [V12] named table
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,  -- [DERIVED] null = built-in
+    workspace_id  uuid NOT NULL                                       -- [DECISION: ADR-0006]
+        REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     name          text NOT NULL,                                     -- [DECISION]
     role          text NOT NULL,                                     -- [V12] planner/researcher/analyst/skeptic/synthesizer
     status        text NOT NULL DEFAULT 'active',                    -- [DECISION]
     created_at    timestamptz NOT NULL DEFAULT now(),                -- [V11]
-    UNIQUE (workspace_id, name)                                      -- [DECISION]
+    UNIQUE (workspace_id, name),                                     -- [DECISION]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 -- [V12] "Every important object is versioned": prompts, agent definitions,
 --       models, tools, workflows, memory, policies, evaluators
 CREATE TABLE continuum.agent_versions (
     id                uuid PRIMARY KEY,                              -- [V12] referenced as agent_version_id
-    agent_id          uuid NOT NULL REFERENCES continuum.agents(id) ON DELETE CASCADE,
-    workspace_id      uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    agent_id          uuid NOT NULL,                                 -- [V12]
+    workspace_id      uuid NOT NULL                                  -- [DECISION: ADR-0006]
+        REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] the parent is named by (workspace_id, id), not by id alone:
+    -- a single-column FK proves the agent exists, not that it is this
+    -- tenant's agent. See ADR-0006.
+    FOREIGN KEY (workspace_id, agent_id)
+        REFERENCES continuum.agents (workspace_id, id) ON DELETE CASCADE,
     version           integer NOT NULL,                              -- [DERIVED]
     prompt_hash       char(64) NOT NULL,                             -- [DERIVED] prompts are versioned objects
     prompt_artifact_id uuid,                                         -- [V12] >256 KiB offloads to S3
@@ -234,7 +242,8 @@ CREATE TABLE continuum.agent_versions (
     output_schema_id  text,                                          -- [V12] ExecuteAgentInput field
     status            continuum.promotion_stage NOT NULL DEFAULT 'promoted',  -- [DERIVED]
     created_at        timestamptz NOT NULL DEFAULT now(),            -- [V11]
-    UNIQUE (agent_id, version)                                       -- [DERIVED]
+    UNIQUE (agent_id, version),                                      -- [DERIVED]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 ```
 
@@ -849,6 +858,20 @@ than RLS. `[DECISION]`
 Because `continuum.current_workspace_id()` returns `NULL` when `app.workspace_id`
 is unset, every policy fails closed. `[V12]`
 
+**RLS is not sufficient on its own.** PostgreSQL evaluates referential
+integrity with row security suspended — the documented behaviour, so that a
+foreign key cannot be defeated by a policy. The consequence is that a tenant
+which cannot *read* another tenant's row can still *reference* it: the hard
+gate of zero cross-workspace access is not reachable by policies alone. Every
+foreign key naming a tenant-scoped parent therefore names it by
+`(workspace_id, id)`. `[DECISION: ADR-0006]`
+
+`agents` and `agent_versions` previously allowed `workspace_id IS NULL` to mean
+a built-in shared by every tenant, and carried a second read policy admitting
+those rows. Both are withdrawn: under `MATCH SIMPLE` a NULL in a referencing
+column skips the composite check entirely, so a nullable `workspace_id` is the
+one thing that reopens the hole the composite keys close. `[DECISION: ADR-0006]`
+
 ### 4.3 Artifact retention
 
 v1.2 states the schedule directly, and reserves S3 Object Lock for the **audit
@@ -1110,8 +1133,12 @@ Constraints these must satisfy, all `[V12]`:
 5. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
 6. **Language dependency versions** (§6.2) — deliberately unpinned here.
 7. **`users` / `models` exemption from RLS** (§5).
-8. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
-   by every tenant under a dedicated read policy.
+8. ~~**Built-in agent visibility** (§5)~~ — **RESOLVED by ADR-0006.**
+   Withdrawn rather than approved. A nullable `workspace_id` is what let a
+   row escape a tenant-qualified foreign key under `MATCH SIMPLE`, so the
+   shared catalogue and the composite keys could not both stand. Every
+   tenant-scoped row now names its workspace, and the read policy that
+   admitted `workspace_id IS NULL` is gone with it.
 9. **Role and function names** — already approved under ADR-0001.
 
 **Complete enumeration.** The list below is generated from the
