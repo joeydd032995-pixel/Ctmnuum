@@ -47,26 +47,57 @@ jobs:
         run: uv run python -m unittest discover -s tests/control_plane -p 'test_*.py' -v
 
       - name: Verify implementation control state
-        run: python -m scripts.control_plane_policy verify
+        run: uv run python -m scripts.control_plane_policy verify
+
+  # Reporting is a separate job, and its always() is at JOB level.
+  #
+  # These three steps used to live in verify-control-plane with a step-level
+  # `if: always()`, so the report and the PR status comment appeared even when
+  # verification failed -- which is exactly when someone needs to read them.
+  # Introducing `needs: quality` silently broke that: GitHub skips a whole job
+  # whose dependency failed, and a skipped job never evaluates step-level
+  # conditions. A lint or typecheck failure would therefore have suppressed the
+  # very report designed to survive failure.
+  #
+  # A job-level `if: always()` runs regardless of what its dependencies did, so
+  # the guarantee is restored while the comment still lands after the checks.
+  publish-control-plane-status:
+    needs: [quality, verify-control-plane]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.8.17
+
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
 
       - name: Generate implementation report
-        if: always()
         run: |
           if [ -f scripts/control_plane_policy.py ]; then
-            python -m scripts.control_plane_policy report > control-plane-report.md || true
+            uv run python -m scripts.control_plane_policy report > control-plane-report.md || true
           else
             printf '# Continuum Implementation Control Plane\n\nVerifier is not implemented yet.\n' > control-plane-report.md
           fi
 
       - name: Upload implementation report
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: implementation-control-plane-report
           path: control-plane-report.md
 
       - name: Publish PR control-plane status
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
         uses: actions/github-script@v7
         with:
           script: |

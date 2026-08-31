@@ -68,6 +68,64 @@ REQUIRED_DIRS = (
 )
 
 
+_VERSION_CLAUSE = re.compile(r"^\s*(>=|<=|==|!=|<|>)\s*([0-9]+(?:\.[0-9]+)*)\s*$")
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
+
+
+def _requires_python_errors(python_version: str, requires_python: str) -> list[str]:
+    """Check that .python-version satisfies every requires-python clause.
+
+    [tool.continuum].python is a private convention; `requires-python` is what
+    actually drives dependency resolution. Comparing against the private value
+    alone lets `requires-python = ">=3.14,<3.15"` sit beside a pinned 3.13
+    interpreter the project explicitly rejects, with nothing to catch it.
+    """
+
+    if not requires_python:
+        return ["pyproject.toml [project] does not declare requires-python"]
+
+    errors: list[str] = []
+    actual = _version_tuple(python_version)
+
+    for clause in requires_python.split(","):
+        match = _VERSION_CLAUSE.match(clause)
+        if not match:
+            # Fail closed. A clause this cannot parse is not one it may ignore:
+            # skipping the unrecognised case is precisely how a check ends up
+            # passing on the schema it was written to reject.
+            errors.append(
+                f"requires-python clause {clause.strip()!r} is not one this gate "
+                f"understands; extend the check rather than widening the pin"
+            )
+            continue
+
+        operator, bound_text = match.groups()
+        bound = _version_tuple(bound_text)
+        width = max(len(actual), len(bound))
+        left = actual + (0,) * (width - len(actual))
+        right = bound + (0,) * (width - len(bound))
+
+        satisfied = {
+            ">=": left >= right,
+            "<=": left <= right,
+            ">": left > right,
+            "<": left < right,
+            "==": left == right,
+            "!=": left != right,
+        }[operator]
+
+        if not satisfied:
+            errors.append(
+                f".python-version '{python_version}' does not satisfy "
+                f"requires-python clause '{operator}{bound_text}'"
+            )
+
+    return errors
+
+
 def _runtime_pin_errors() -> list[str]:
     """Check that the pinned runtimes agree with each other.
 
@@ -92,6 +150,12 @@ def _runtime_pin_errors() -> list[str]:
             f".python-version '{python_version}' does not match "
             f"[tool.continuum].python '{declared_python}'"
         )
+
+    errors.extend(
+        _requires_python_errors(
+            python_version, pyproject.get("project", {}).get("requires-python", "")
+        )
+    )
 
     # Node: .node-version must equal the lower bound engines.node allows.
     node_version = (ROOT / ".node-version").read_text(encoding="utf-8").strip()

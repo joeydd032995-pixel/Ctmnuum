@@ -180,6 +180,100 @@ than locally; they are formatter-class changes that cannot alter semantics, and
 `async with A as env, Worker(env.client, ...)` binds `env` before the second
 context manager is evaluated.
 
+## Review round: three findings, all confirmed
+
+### The G3 claim was overstated, and the gate was partial
+
+`FND-REPO-G3` reads *"format, lint and typecheck run in CI **ahead of unit
+tests**"*. I wired `needs: quality` into two workflows and marked the gate
+`PASS`. Audited across every workflow afterwards:
+
+| Workflow | Runs unit tests | Gated (before) |
+|---|---|---|
+| `implementation-control-plane.yml` | yes | yes |
+| `temporal-foundation.yml` | yes | yes |
+| **`foundation-db-bootstrap.yml`** | **yes** | **no** |
+| `derived-core-schema.yml`, `foundation-db-integration.yml`, `foundation-structure.yml` | no | n/a |
+
+`foundation-db-bootstrap.yml` ran `python -m unittest
+tests.unit.test_database_bootstrap_contract` with neither a `needs:` nor a call
+to `quality.yml`, so on a pull request it raced the quality job. The gate held
+for two of three test workflows.
+
+This is worth recording as a governance failure rather than a CI one. The status
+of a hard gate is the thing this control plane exists to make trustworthy; a
+`PASS` that holds for most of the surface is the same class of error as an
+assertion that passes on a schema it was written to reject.
+
+Now gated, and moved onto `uv sync --locked` — the test imports only the
+standard library, so bare `python` happened to work, which is luck rather than
+design.
+
+### Gating the job silently disabled the always-run reporting
+
+`verify-control-plane` carried three steps with `if: always()` — generate
+report, upload report, publish the PR status comment. The `always()` is
+deliberate: those outputs must appear **when verification fails**, which is
+exactly when someone needs to read them.
+
+Adding `needs: quality` inverted that. GitHub **skips** a job whose dependency
+failed, and a skipped job never evaluates step-level conditions. So a
+formatting, lint or typecheck failure would have suppressed the report designed
+to survive failure.
+
+No test and no CI run could have caught this: every run had quality passing, so
+the skip path never executed. It is visible only by reading the interaction
+between a job-level `needs:` and a step-level `always()`.
+
+Reporting is now its own job, `publish-control-plane-status`, with
+`needs: [quality, verify-control-plane]` and **`if: always()` at job level** —
+which runs regardless of what its dependencies did.
+
+**This is not verified by a green CI run**, and the PR says so. Confirming it
+requires a red quality job in real CI. What is verified is structural — parsing
+every workflow and asserting that no test job is ungated and no reporting job
+sits behind an unconditional gate:
+
+```
+workflow                           job                            tests  needs                        if
+foundation-db-bootstrap.yml        database-bootstrap-contract    True   quality                      -
+implementation-control-plane.yml   verify-control-plane           True   quality                      -
+implementation-control-plane.yml   publish-control-plane-status   False  quality,verify-control-plane always()
+temporal-foundation.yml            temporal-contracts             True   quality                      -
+```
+
+A permanent version of that check would make the gate self-enforcing rather than
+conventional, and belongs in `FND-CICD-001` rather than widening this package.
+
+### The pin check ignored `requires-python`
+
+`_runtime_pin_errors()` compared `.python-version` against the private
+`[tool.continuum].python` only. `[project].requires-python` — which actually
+drives resolution — was never read, so raising it to `>=3.14,<3.15` while both
+other values stayed at `3.13` passed the gate.
+
+Now checked clause by clause. The design decision worth stating: the parser
+**fails closed** on an operator it does not recognise, rather than skipping it.
+Silently ignoring the unparseable case is how a check comes to pass on the
+input it was written to reject — the third instance of that shape in this
+package, after assertion 28 computing its expected value from the function under
+test and assertion 33 testing membership instead of position.
+
+One nuance found while testing: under `uv run`, uv itself refuses to start when
+`.python-version` conflicts with `requires-python` (exit 2). But
+`foundation-structure.yml` runs the script with **bare `python`**, where uv's
+protection does not apply — which is the path this check actually covers. The
+controls below therefore run under bare `python`, matching that workflow.
+
+| Mutation | Result |
+|---|---|
+| *(none — baseline)* | `structure and runtime pins are consistent` |
+| `requires-python` → `>=3.14,<3.15` | `.python-version '3.13.5' does not satisfy requires-python clause '>=3.14'` |
+| `requires-python` → `>=3.13,<3.13` | `.python-version '3.13.5' does not satisfy requires-python clause '<3.13'` |
+| `requires-python` → `^3.13` | `requires-python clause '^3.13' is not one this gate understands` |
+| `requires-python` removed | `pyproject.toml [project] does not declare requires-python` |
+| `.python-version` → `3.12.0` | `.python-version '3.12.0' does not match [tool.continuum].python '3.13'` |
+
 ## Safety and rollback
 
 No production system, cloud resource or schema is touched. Rollback is a Git
