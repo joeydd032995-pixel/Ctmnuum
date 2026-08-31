@@ -22,9 +22,7 @@ class WorkerVersioningTests(unittest.IsolatedAsyncioTestCase):
             build_id="orchestrator-2026.08.25",
             rollback_build_id="orchestrator-2026.08.24",
         )
-        config_factory = getattr(
-            deployment_module, "build_temporal_deployment_config", None
-        )
+        config_factory = getattr(deployment_module, "build_temporal_deployment_config", None)
         self.assertIsNotNone(config_factory)
         if config_factory is None:
             return
@@ -33,9 +31,7 @@ class WorkerVersioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config.use_worker_versioning)
         self.assertEqual(config.version.deployment_name, "continuum-orchestrator")
         self.assertEqual(config.version.build_id, "orchestrator-2026.08.25")
-        self.assertEqual(
-            config.default_versioning_behavior, VersioningBehavior.UNSPECIFIED
-        )
+        self.assertEqual(config.default_versioning_behavior, VersioningBehavior.UNSPECIFIED)
         self.assertFalse(deployment.preview_features_enabled)
 
     def test_foundation_workflow_is_explicitly_pinned(self) -> None:
@@ -55,9 +51,7 @@ class WorkerVersioningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(selector(deployment), "orchestrator-2026.08.24")
 
     def test_rollback_rejects_deployment_without_previous_build(self) -> None:
-        deployment = deployment_module.build_worker_deployment(
-            build_id="orchestrator-2026.08.25"
-        )
+        deployment = deployment_module.build_worker_deployment(build_id="orchestrator-2026.08.25")
         selector = getattr(deployment_module, "select_rollback_build", None)
         self.assertIsNotNone(selector)
         if selector is None:
@@ -67,18 +61,17 @@ class WorkerVersioningTests(unittest.IsolatedAsyncioTestCase):
             selector(deployment)
 
     async def test_versioned_worker_covers_and_executes_foundation_queue(self) -> None:
-        deployment = deployment_module.build_worker_deployment(
-            build_id="orchestrator-2026.08.25"
-        )
+        deployment = deployment_module.build_worker_deployment(build_id="orchestrator-2026.08.25")
         self.assertIn(FOUNDATION_TASK_QUEUE, deployment.task_queues)
 
-        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
-            env.client,
-            task_queue=FOUNDATION_TASK_QUEUE,
-            workflows=[FoundationWorkflow],
-            activities=[FoundationActivity.execute],
-            deployment_config=deployment_module.build_temporal_deployment_config(
-                deployment
+        async with (
+            await WorkflowEnvironment.start_time_skipping() as env,
+            Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[FoundationWorkflow],
+                activities=[FoundationActivity.execute],
+                deployment_config=deployment_module.build_temporal_deployment_config(deployment),
             ),
         ):
             result = await env.client.execute_workflow(

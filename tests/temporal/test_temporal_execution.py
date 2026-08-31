@@ -18,11 +18,14 @@ from services.orchestrator.temporal.runtime import (
 
 class TemporalExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_foundation_workflow_executes_through_temporal_worker(self) -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
-            env.client,
-            task_queue=FOUNDATION_TASK_QUEUE,
-            workflows=[FoundationWorkflow],
-            activities=[FoundationActivity.execute],
+        async with (
+            await WorkflowEnvironment.start_time_skipping() as env,
+            Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[FoundationWorkflow],
+                activities=[FoundationActivity.execute],
+            ),
         ):
             request = WorkflowRequest(
                 workspace_id="workspace-1",
@@ -45,11 +48,14 @@ class TemporalExecutionTests(unittest.IsolatedAsyncioTestCase):
     async def test_invalid_request_fails_execution_without_workflow_task_retry_loop(
         self,
     ) -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
-            env.client,
-            task_queue=FOUNDATION_TASK_QUEUE,
-            workflows=[FoundationWorkflow],
-            activities=[FoundationActivity.execute],
+        async with (
+            await WorkflowEnvironment.start_time_skipping() as env,
+            Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[FoundationWorkflow],
+                activities=[FoundationActivity.execute],
+            ),
         ):
             handle = await env.client.start_workflow(
                 FoundationWorkflow.run,

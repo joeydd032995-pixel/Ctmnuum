@@ -30,9 +30,7 @@ def policy_errors(state: ControlState) -> list[str]:
 
     errors: list[str] = []
 
-    ordered_phases = sorted(
-        state.phases.values(), key=lambda phase: phase.get("order", 0)
-    )
+    ordered_phases = sorted(state.phases.values(), key=lambda phase: phase.get("order", 0))
     expected_orders = list(range(1, len(ordered_phases) + 1))
     actual_orders = [phase.get("order") for phase in ordered_phases]
     if actual_orders != expected_orders:
@@ -61,9 +59,7 @@ def policy_errors(state: ControlState) -> list[str]:
             continue
         for package_id in blocks:
             if not isinstance(package_id, str) or not package_id.strip():
-                errors.append(
-                    f"source gap {gap_id}: blocks entries must be non-empty strings"
-                )
+                errors.append(f"source gap {gap_id}: blocks entries must be non-empty strings")
             elif package_id not in state.work_packages:
                 errors.append(
                     f"source gap {gap_id}: blocks unknown work package "
@@ -151,9 +147,7 @@ def _repository_root() -> Path:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Continuum implementation governance policy layer"
-    )
+    parser = argparse.ArgumentParser(description="Continuum implementation governance policy layer")
     parser.add_argument("command", choices=("verify", "report", "next"))
     parser.add_argument("--root", type=Path, default=_repository_root())
     return parser

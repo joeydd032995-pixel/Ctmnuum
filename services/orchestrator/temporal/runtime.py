@@ -38,6 +38,7 @@ __all__ = [
     "activity_execution_options",
 ]
 
+
 class ActivityExecutionOptions(TypedDict):
     """Keyword arguments for workflow.execute_activity.
 
@@ -56,12 +57,8 @@ class ActivityExecutionOptions(TypedDict):
 def activity_execution_options(policy_name: str) -> ActivityExecutionOptions:
     policy = ACTIVITY_POLICIES[policy_name]
     options: ActivityExecutionOptions = {
-        "start_to_close_timeout": timedelta(
-            seconds=policy.start_to_close_timeout_seconds
-        ),
-        "schedule_to_close_timeout": timedelta(
-            seconds=policy.schedule_to_close_timeout_seconds
-        ),
+        "start_to_close_timeout": timedelta(seconds=policy.start_to_close_timeout_seconds),
+        "schedule_to_close_timeout": timedelta(seconds=policy.schedule_to_close_timeout_seconds),
         "retry_policy": RetryPolicy(
             maximum_attempts=policy.maximum_attempts,
             non_retryable_error_types=policy.non_retryable_error_types,
@@ -73,9 +70,7 @@ def activity_execution_options(policy_name: str) -> ActivityExecutionOptions:
         ),
     }
     if policy.heartbeat_timeout_seconds is not None:
-        options["heartbeat_timeout"] = timedelta(
-            seconds=policy.heartbeat_timeout_seconds
-        )
+        options["heartbeat_timeout"] = timedelta(seconds=policy.heartbeat_timeout_seconds)
     return options
 
 

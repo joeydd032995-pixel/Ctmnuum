@@ -42,12 +42,8 @@ class LegacyFoundationWorkflow:
         return await workflow.execute_activity(
             FoundationActivity.execute,
             args=[request, context],
-            start_to_close_timeout=timedelta(
-                seconds=policy.start_to_close_timeout_seconds
-            ),
-            schedule_to_close_timeout=timedelta(
-                seconds=policy.schedule_to_close_timeout_seconds
-            ),
+            start_to_close_timeout=timedelta(seconds=policy.start_to_close_timeout_seconds),
+            schedule_to_close_timeout=timedelta(seconds=policy.schedule_to_close_timeout_seconds),
             retry_policy=RetryPolicy(maximum_attempts=policy.maximum_attempts),
         )
 
@@ -63,11 +59,14 @@ def _request(run_id: str) -> WorkflowRequest:
 
 class TemporalReplayTests(unittest.IsolatedAsyncioTestCase):
     async def test_current_history_records_patch_marker_and_replays(self) -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
-            env.client,
-            task_queue=FOUNDATION_TASK_QUEUE,
-            workflows=[FoundationWorkflow],
-            activities=[FoundationActivity.execute],
+        async with (
+            await WorkflowEnvironment.start_time_skipping() as env,
+            Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[FoundationWorkflow],
+                activities=[FoundationActivity.execute],
+            ),
         ):
             handle = await env.client.start_workflow(
                 FoundationWorkflow.run,
@@ -88,11 +87,14 @@ class TemporalReplayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(replay.replay_failure)
 
     async def test_current_workflow_replays_pre_patch_history(self) -> None:
-        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
-            env.client,
-            task_queue=FOUNDATION_TASK_QUEUE,
-            workflows=[LegacyFoundationWorkflow],
-            activities=[FoundationActivity.execute],
+        async with (
+            await WorkflowEnvironment.start_time_skipping() as env,
+            Worker(
+                env.client,
+                task_queue=FOUNDATION_TASK_QUEUE,
+                workflows=[LegacyFoundationWorkflow],
+                activities=[FoundationActivity.execute],
+            ),
         ):
             handle = await env.client.start_workflow(
                 LegacyFoundationWorkflow.run,

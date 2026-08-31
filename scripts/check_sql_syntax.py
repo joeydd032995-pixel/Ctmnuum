@@ -23,7 +23,8 @@ DEFAULT_TARGETS = (
 
 def check(path: Path) -> bool:
     sql = "\n".join(
-        line for line in path.read_text(encoding="utf-8").splitlines()
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
         if not line.startswith("\\")  # psql meta-commands are not SQL
     )
     try:

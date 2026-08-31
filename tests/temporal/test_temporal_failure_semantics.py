@@ -53,9 +53,7 @@ class TemporalFailureSemanticsTests(unittest.TestCase):
 
         options = options_factory("long_running")
         self.assertEqual(options["heartbeat_timeout"], timedelta(seconds=30))
-        self.assertEqual(
-            options["cancellation_type"], workflow.ActivityCancellationType.TRY_CANCEL
-        )
+        self.assertEqual(options["cancellation_type"], workflow.ActivityCancellationType.TRY_CANCEL)
         self.assertEqual(options["retry_policy"].maximum_attempts, 2)
 
     def test_activity_context_uses_stable_idempotency_key(self) -> None:
