@@ -567,6 +567,144 @@ deletes the S3 object and sets `content_deleted_at`. ADR-0005 gives that job a
 contract it cannot violate; it does not implement it. The audit bucket's Object
 Lock decision is untouched, as v1.2 reserves it.
 
+## Eighth round: RLS does not stop a tenant naming another tenant's row
+
+ADR-0003 deferred five single-column foreign keys as "no longer urgent, still a
+defect", on the reasoning that the hazard was `ON DELETE CASCADE` crossing the
+tenant boundary and that ADR-0003 had left no role holding `DELETE`.
+
+That reasoning was wrong, and the way it was found is the point: the fix was not
+started by reading the ADR, it was started by running the unfixed schema.
+
+### The defect was live, not latent
+
+PostgreSQL evaluates referential integrity with row security suspended — its
+documented behaviour, so a foreign key cannot be defeated by a policy. The same
+property means a tenant that cannot *read* a row can still *reference* it, and
+that needs only `INSERT`, which `continuum_app` holds.
+
+Against the schema as it stood, as `continuum_app` with `app.workspace_id` set
+to workspace B:
+
+```text
+A run visible to B: 0
+B failure -> A run:            ACCEPTED
+B agent_version -> A agent:    ACCEPTED
+```
+
+RLS was working exactly as designed — B could not see A's run — and B referenced
+it anyway. The cascade was indeed unreachable; the cross-tenant reference never
+needed it.
+
+The same result appears a second time in the negative controls below, where
+reverting one FK to its single-column form makes assertion 32 fail with
+`continuum_app referenced another workspace's run through the RI bypass`.
+
+### The count was five; it was actually sixteen
+
+ADR-0003 named `agent_versions.agent_id`, `tool_versions.tool_id`,
+`evaluation_results.evaluation_id` and `mutation_evaluations.mutation_id` /
+`.evaluation_id`. Those are the cascading relationships. Eleven more — mostly
+`run_id` on `evidence`, `claims`, `memories`, `failures`, `tool_executions`,
+`artifacts`, `cost_events` and `events` — carry the identical defect and had
+never been enumerated. All sixteen are now qualified by `workspace_id`.
+
+### A nullable column would have kept the hole open
+
+Nine tables declared `workspace_id` nullable, with `NULL` meaning a built-in
+shared by every tenant. Under `MATCH SIMPLE` a `NULL` in any referencing column
+skips the composite check **entirely**, so that nullability is not a feature
+beside tenant-qualified keys — it is the thing that defeats them. ADR-0006
+records why the shared catalogue lost: never `[V12]`, never approved (it was
+decision 8), and half-built, since only two of the nine tables ever had the read
+policy that would have made a `NULL` row visible to anyone.
+
+### Assertion 35 was rewritten because its own negative control exposed it
+
+The first version ended on a value comparison: after deleting the parent, check
+that `workspace_id` survived. Breaking the schema showed that comparison was
+unreachable. A bare `ON DELETE SET NULL` does not produce a wrongly-nulled row —
+it raises a not-null violation, because the column is `NOT NULL`. The assertion
+did fail, but at a statement whose error message says nothing about foreign
+keys.
+
+This is the second time in this package that an assertion of mine survived
+review and was caught only by deliberately breaking the thing it covered. The
+first was assertion 28, which computed its expected dates by calling the
+function under test. Neither was found by reading.
+
+### Negative controls
+
+Every new assertion was run against a deliberately broken schema before being
+trusted. Local PostgreSQL 16, with the pgvector declarations stripped, since the
+review sandbox has neither pgvector nor a Docker daemon; CI runs the unmodified
+files on `pgvector/pgvector:0.8.6-pg18-trixie`.
+
+| Mutation | Result |
+|---|---|
+| *(none — baseline)* | `PASSED` |
+| `agent_versions.agent_id` → single-column FK | **31** `cross-workspace parent reference was accepted on a cascading FK` |
+| `failures.run_id` → single-column FK | **32** `continuum_app referenced another workspace's run through the RI bypass` |
+| `ALTER TABLE ... ADD CONSTRAINT bad_fk FOREIGN KEY (run_id) REFERENCES continuum.runs (id)` | **33** `foreign key(s) not tying the child workspace_id to the parent's: continuum.cost_events.bad_fk -> continuum.runs` |
+| `ALTER TABLE continuum.tools ALTER COLUMN workspace_id DROP NOT NULL` | **34** `workspace_id is nullable on: tools` |
+| `SET NULL` without its column list | **35** `ON DELETE SET NULL tried to null workspace_id: the constraint is missing its column list` |
+| `CASCADE` in place of `SET NULL` | **35** `the child row did not survive its parent; SET NULL behaved as CASCADE` |
+| `IS NULL` disjunct restored to a read policy | **13** `policy admits a workspace-less row: agents.agents_read` |
+
+Assertion 34 also caught a defect in itself on first run: written against
+`information_schema.columns`, it named `continuum.artifacts_due_for_expiry` as
+an offender, because a view's columns are always reported nullable. It reads
+`pg_attribute` and filters to `relkind = 'r'`.
+
+Assertion 33 caught one leftover on first run — `memory_embeddings_memory_id_fkey`,
+the single-column FK inside the block reproduced verbatim from v1.2. It is
+dropped outside that block, so the reproduced text stays unmodified.
+
+### Review round: two findings from Codex, both accepted
+
+**Assertion 33 tested membership, not correspondence.** It asked whether the
+parent's `workspace_id` appeared anywhere in the referenced column list. That
+accepts a constraint which names it from the wrong child column:
+
+```sql
+FOREIGN KEY (id, run_id) REFERENCES continuum.runs (workspace_id, id)
+```
+
+Reproduced before fixing. With that constraint in place the assertion reported
+no offenders, and `continuum_app` scoped to workspace B successfully inserted a
+`cost_events` row referencing workspace A's run — by putting A's workspace UUID
+in `id`. The check now walks `confkey` with ordinality and requires the child
+column at the same position to be `workspace_id`. Both mutations — the
+single-column FK and the swapped-ordinal one — now fail it, and the message was
+reworded, since "names its parent by id alone" did not describe the second case.
+
+This is the third assertion of mine in this package to survive my own review and
+fail only under a mutation nobody had tried. The pattern is consistent: an
+assertion that queries *for the presence of the right thing* tends to pass on
+schemas that contain the right thing in the wrong place.
+
+**The companion document still described the pre-fix schema.** `[V12]` and
+`[V11]` snippets throughout §3 showed `run_id uuid REFERENCES continuum.runs(id)`
+and nullable `workspace_id` columns — the exact shape ADR-0006 removes. Anyone
+implementing from the document rather than the SQL would have rebuilt the
+vulnerability. Nineteen foreign keys and seven `workspace_id` columns across the
+document were corrected, the eight parent snippets gained
+`UNIQUE (workspace_id, id)`, and §3 now states plainly that the SQL file is
+authoritative and these excerpts are abridged.
+
+The `memory_embeddings` block is deliberately still wrong, and now says so: it
+is reproduced verbatim from v1.2, its two independent single-column keys *are*
+the defect §5 describes, and the schema closes it outside the block so the
+reproduced text stays unmodified.
+
+### What CI must still show
+
+`python scripts/check_sql_syntax.py` accepts `ON DELETE SET NULL (run_id)` under
+pglast's PostgreSQL 18 grammar, and applying the schema locally confirms all
+seven constraints recorded the column list in `pg_constraint.confdelsetcols`
+rather than merely parsing. A green CI check proves the job exited zero; the
+`NOTICE` lines from assertions 13 and 31–35 are quoted in the pull request.
+
 ## What this package deliberately does not do
 
 It **does not close `SRC-001`**. Issue #2's second close criterion requires

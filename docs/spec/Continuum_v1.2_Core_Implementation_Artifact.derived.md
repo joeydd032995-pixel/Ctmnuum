@@ -141,6 +141,19 @@ CREATE TYPE continuum.run_status AS ENUM (
 
 ## 3. Core PostgreSQL DDL
 
+> **The SQL file is authoritative, not these excerpts.**
+> `docs/spec/continuum_v1.2_core_schema.derived.sql` is what CI executes and
+> verifies. The blocks below are abridged for reading — some omit columns,
+> constraints and indexes the schema declares. Where the two disagree, the SQL
+> file is correct and this document is stale. Implement from it.
+>
+> In particular, every foreign key naming a tenant-scoped parent names it by
+> `(workspace_id, id)`, and every parent so referenced carries
+> `UNIQUE (workspace_id, id)`. A single-column reference is a cross-tenant
+> defect, not a simplification: referential integrity checks bypass row
+> security, so a tenant that cannot read a row can still name it.
+> `[DECISION: ADR-0006]`
+
 v1.2 names exactly these 25 tables. `[V12]`
 
 Universal column rule, applied to every high-volume table: `workspace_id`,
@@ -201,7 +214,8 @@ CREATE TABLE continuum.runs (
     trace_id          char(32) CHECK (trace_id ~ '^[0-9a-f]{32}$'),  -- [V12] ActivityContext pattern
     started_at        timestamptz,                                   -- [DECISION]
     completed_at      timestamptz,                                   -- [DECISION]
-    created_at        timestamptz NOT NULL DEFAULT now()             -- [V11]
+    created_at        timestamptz NOT NULL DEFAULT now(),             -- [V11]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE INDEX runs_workspace_created_idx
@@ -213,20 +227,28 @@ CREATE INDEX runs_workspace_created_idx
 ```sql
 CREATE TABLE continuum.agents (
     id            uuid PRIMARY KEY,                                  -- [V12] named table
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,  -- [DERIVED] null = built-in
+    workspace_id  uuid NOT NULL                                       -- [DECISION: ADR-0006]
+        REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     name          text NOT NULL,                                     -- [DECISION]
     role          text NOT NULL,                                     -- [V12] planner/researcher/analyst/skeptic/synthesizer
     status        text NOT NULL DEFAULT 'active',                    -- [DECISION]
     created_at    timestamptz NOT NULL DEFAULT now(),                -- [V11]
-    UNIQUE (workspace_id, name)                                      -- [DECISION]
+    UNIQUE (workspace_id, name),                                     -- [DECISION]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 -- [V12] "Every important object is versioned": prompts, agent definitions,
 --       models, tools, workflows, memory, policies, evaluators
 CREATE TABLE continuum.agent_versions (
     id                uuid PRIMARY KEY,                              -- [V12] referenced as agent_version_id
-    agent_id          uuid NOT NULL REFERENCES continuum.agents(id) ON DELETE CASCADE,
-    workspace_id      uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    agent_id          uuid NOT NULL,                                 -- [V12]
+    workspace_id      uuid NOT NULL                                  -- [DECISION: ADR-0006]
+        REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] the parent is named by (workspace_id, id), not by id alone:
+    -- a single-column FK proves the agent exists, not that it is this
+    -- tenant's agent. See ADR-0006.
+    FOREIGN KEY (workspace_id, agent_id)
+        REFERENCES continuum.agents (workspace_id, id) ON DELETE CASCADE,
     version           integer NOT NULL,                              -- [DERIVED]
     prompt_hash       char(64) NOT NULL,                             -- [DERIVED] prompts are versioned objects
     prompt_artifact_id uuid,                                         -- [V12] >256 KiB offloads to S3
@@ -234,7 +256,8 @@ CREATE TABLE continuum.agent_versions (
     output_schema_id  text,                                          -- [V12] ExecuteAgentInput field
     status            continuum.promotion_stage NOT NULL DEFAULT 'promoted',  -- [DERIVED]
     created_at        timestamptz NOT NULL DEFAULT now(),            -- [V11]
-    UNIQUE (agent_id, version)                                       -- [DERIVED]
+    UNIQUE (agent_id, version),                                      -- [DERIVED]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 ```
 
@@ -258,7 +281,7 @@ CREATE TABLE continuum.models (
 CREATE TABLE continuum.model_metrics (
     id                  uuid PRIMARY KEY,                            -- [V12] named table
     model_id            uuid NOT NULL REFERENCES continuum.models(id) ON DELETE CASCADE,
-    workspace_id        uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     task_family         text NOT NULL,                               -- [V12] ModelRequest.task_family
     window_start        timestamptz NOT NULL,                        -- [DECISION]
     window_end          timestamptz NOT NULL,                        -- [DECISION]
@@ -281,7 +304,9 @@ Reproduced from the v1.1 typed `Claim` and `Evidence` models. `[V11]`
 CREATE TABLE continuum.evidence (
     id            uuid PRIMARY KEY,                                  -- [V11] Evidence.id
     workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id        uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id        uuid,
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     type          continuum.evidence_type NOT NULL,                  -- [V11] Evidence.type
     uri           text,                                              -- [V11] Evidence.uri
     content_hash  char(64) NOT NULL,                                 -- [V11] Evidence.content_hash
@@ -293,31 +318,43 @@ CREATE TABLE continuum.evidence (
     payload       continuum.jsonb_256k NOT NULL DEFAULT '{}'::jsonb, -- [V11] Evidence.payload, [DERIVED] bound
     payload_artifact_id uuid,                                        -- [DERIVED] column; [V12] >256 KiB offload rule
     trace_id      char(32),                                          -- [V11] universal column rule
-    created_at    timestamptz NOT NULL DEFAULT now()                 -- [V11]
+    created_at    timestamptz NOT NULL DEFAULT now(),                 -- [V11]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE TABLE continuum.claims (
     id                        uuid PRIMARY KEY,                      -- [V11] Claim.id
     workspace_id              uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id                    uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id                    uuid,
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     statement                 text NOT NULL,                         -- [V11] Claim.statement
     status                    continuum.claim_status NOT NULL,       -- [V11] Claim.status
     confidence                double precision NOT NULL              -- [V11] Claim.confidence, ge=0 le=1
         CHECK (confidence BETWEEN 0 AND 1),
     assumptions               text[] NOT NULL DEFAULT '{}',          -- [V11] Claim.assumptions
     falsification_conditions  text[] NOT NULL DEFAULT '{}',          -- [V11] Claim.falsification_conditions
-    created_by_agent_version  uuid REFERENCES continuum.agent_versions(id),  -- [V11]
-    superseded_by             uuid REFERENCES continuum.claims(id),  -- [DERIVED] belief change stays visible
+    created_by_agent_version  uuid,  -- [V11]
+    FOREIGN KEY (workspace_id, created_by_agent_version)
+        REFERENCES continuum.agent_versions (workspace_id, id),
+    superseded_by             uuid,  -- [DERIVED] belief change stays visible
+    FOREIGN KEY (workspace_id, superseded_by)
+        REFERENCES continuum.claims (workspace_id, id),
     trace_id                  char(32),                              -- [V11]
-    created_at                timestamptz NOT NULL DEFAULT now()     -- [V11] Claim.created_at
+    created_at                timestamptz NOT NULL DEFAULT now(),     -- [V11] Claim.created_at
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 -- [V12] named table. v1.1 modelled the relation as two id arrays on Claim;
 -- normalising to a join table preserves the same information and makes the
 -- "why do you believe X" traversal indexable.  [DERIVED] encoding.
 CREATE TABLE continuum.claim_evidence (
-    claim_id      uuid NOT NULL REFERENCES continuum.claims(id) ON DELETE CASCADE,
-    evidence_id   uuid NOT NULL REFERENCES continuum.evidence(id) ON DELETE CASCADE,
+    claim_id      uuid NOT NULL,
+    FOREIGN KEY (workspace_id, claim_id)
+        REFERENCES continuum.claims (workspace_id, id) ON DELETE CASCADE,
+    evidence_id   uuid NOT NULL,
+    FOREIGN KEY (workspace_id, evidence_id)
+        REFERENCES continuum.evidence (workspace_id, id) ON DELETE CASCADE,
     workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     stance        text NOT NULL                                      -- [V11] supporting vs opposing evidence ids
         CHECK (stance IN ('supports','opposes')),
@@ -342,17 +379,22 @@ CREATE TABLE continuum.memories (
     content_artifact_id uuid,                                        -- [V12] >256 KiB offloads to S3
     status         continuum.memory_status NOT NULL DEFAULT 'temporary',  -- [V12] query filters on status
     invalidated_at timestamptz,                                      -- [V12] query predicate
-    superseded_by  uuid REFERENCES continuum.memories(id),           -- [V12] superseded_by -> newer memory
+    superseded_by  uuid,           -- [V12] superseded_by -> newer memory
+    FOREIGN KEY (workspace_id, superseded_by)
+        REFERENCES continuum.memories (workspace_id, id),
     valid_from     timestamptz,                                      -- [V12] query predicate
     valid_until    timestamptz,                                      -- [V12] query predicate
     freshness_class text NOT NULL DEFAULT 'slow_changing'            -- [V12] half-life classes
         CHECK (freshness_class IN ('highly_dynamic','dynamic','slow_changing','stable')),
     salience       double precision CHECK (salience BETWEEN 0 AND 1),  -- [V12] S_salience in compiler scoring
     utility        double precision CHECK (utility BETWEEN 0 AND 1),   -- [V12] S_utility in compiler scoring
-    source_run_id  uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [DERIVED]
+    source_run_id  uuid,  -- [DERIVED]
+    FOREIGN KEY (workspace_id, source_run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (source_run_id),
     search_tsv     tsvector,                                         -- [V12] PostgreSQL FTS is a named source of truth
     trace_id       char(32),                                         -- [V11]
-    created_at     timestamptz NOT NULL DEFAULT now()                -- [V11]
+    created_at     timestamptz NOT NULL DEFAULT now(),                -- [V11]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE INDEX memories_fts_idx ON continuum.memories USING gin (search_tsv);  -- [DERIVED]
@@ -363,6 +405,14 @@ CREATE INDEX memories_workspace_status_idx
 
 `memory_embeddings` is the one table with complete source DDL. Reproduced
 **verbatim**. `[V12]`
+
+The block below is therefore left exactly as v1.2 states it, including its two
+independent single-column foreign keys — which is itself the defect described
+in §5: nothing in them requires the referenced memory to belong to the
+referencing row's workspace. The schema closes it *outside* this block, with an
+`ALTER TABLE` adding `FOREIGN KEY (workspace_id, memory_id)` and dropping the
+now-redundant `memory_id` key, so the reproduced text stays unmodified.
+`[DECISION: ADR-0006]`
 
 ```sql
 CREATE TABLE continuum.memory_embeddings (
@@ -434,7 +484,9 @@ Reproduced from the v1.1 typed `FailureRecord`. `[V11]`
 CREATE TABLE continuum.failures (
     id                    uuid PRIMARY KEY,                          -- [V12] named table
     workspace_id          uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id                uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id                uuid,
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     task_type             text NOT NULL,                             -- [V11] FailureRecord.task_type
     observed_failure      text NOT NULL,                             -- [V11]
     expected_behavior     text NOT NULL,                             -- [V11]
@@ -456,19 +508,22 @@ Column set follows the v1.2 tool manifest JSON Schema. `[V12]`
 ```sql
 CREATE TABLE continuum.tools (
     id            uuid PRIMARY KEY,                                  -- [V12] named table
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     name          text NOT NULL                                      -- [V12] manifest pattern, verbatim
         CHECK (name ~ '^[a-z0-9][a-z0-9._-]{2,127}$'),
     purpose       text NOT NULL CHECK (length(purpose) >= 8),        -- [V12] manifest minLength
     status        text NOT NULL DEFAULT 'active',                    -- [DECISION]
     created_at    timestamptz NOT NULL DEFAULT now(),                -- [V11]
-    UNIQUE (workspace_id, name)                                      -- [DERIVED]
+    UNIQUE (workspace_id, name),                                      -- [DERIVED]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE TABLE continuum.tool_versions (
     id                  uuid PRIMARY KEY,                            -- [V12] named table
-    tool_id             uuid NOT NULL REFERENCES continuum.tools(id) ON DELETE CASCADE,
-    workspace_id        uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    tool_id             uuid NOT NULL,
+    FOREIGN KEY (workspace_id, tool_id)
+        REFERENCES continuum.tools (workspace_id, id) ON DELETE CASCADE,
+    workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     version             text NOT NULL                                -- [V12] manifest semver pattern, verbatim
         CHECK (version ~ '^[0-9]+\.[0-9]+\.[0-9]+$'),
     risk_level          smallint NOT NULL                            -- [V12] manifest 0..4
@@ -489,14 +544,19 @@ CREATE TABLE continuum.tool_versions (
     created_at          timestamptz NOT NULL DEFAULT now(),          -- [V11]
     UNIQUE (tool_id, version),                                       -- [DERIVED]
     -- [V12] risk 3-4 require human approval by default
-    CHECK (risk_level < 3 OR approval_required IS TRUE)
+    CHECK (risk_level < 3 OR approval_required IS TRUE),
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE TABLE continuum.tool_executions (
     id                uuid PRIMARY KEY,                              -- [V12] named table
     workspace_id      uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    tool_version_id   uuid NOT NULL REFERENCES continuum.tool_versions(id),
-    run_id            uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    tool_version_id   uuid NOT NULL,
+    FOREIGN KEY (workspace_id, tool_version_id)
+        REFERENCES continuum.tool_versions (workspace_id, id),
+    run_id            uuid,
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     idempotency_key   text NOT NULL,                                 -- [V12] ActivityContext.idempotency_key
     status            text NOT NULL,                                 -- [DECISION]
     exit_code         integer,                                       -- [V12] ExecResult.exit_code
@@ -524,7 +584,7 @@ CREATE TABLE continuum.tool_executions (
 ```sql
 CREATE TABLE continuum.evaluations (
     id            uuid PRIMARY KEY,                                  -- [V12] named table
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     suite         text NOT NULL,                                     -- [V12] golden/core, adversarial/prompt-injection, ...
     suite_version text NOT NULL,                                     -- [V12] evaluators are versioned objects
     target_type   text NOT NULL,                                     -- [DERIVED] agent_version | tool_version | model | mutation
@@ -532,13 +592,16 @@ CREATE TABLE continuum.evaluations (
     status        text NOT NULL DEFAULT 'pending',                   -- [DECISION]
     started_at    timestamptz,                                       -- [DECISION]
     completed_at  timestamptz,                                       -- [DECISION]
-    created_at    timestamptz NOT NULL DEFAULT now()                 -- [V11]
+    created_at    timestamptz NOT NULL DEFAULT now(),                 -- [V11]
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE TABLE continuum.evaluation_results (
     id             uuid PRIMARY KEY,                                 -- [V12] named table
-    evaluation_id  uuid NOT NULL REFERENCES continuum.evaluations(id) ON DELETE CASCADE,
-    workspace_id   uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    evaluation_id  uuid NOT NULL,
+    FOREIGN KEY (workspace_id, evaluation_id)
+        REFERENCES continuum.evaluations (workspace_id, id) ON DELETE CASCADE,
+    workspace_id   uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     case_id        text NOT NULL,                                    -- [DERIVED] suites are case corpora
     passed         boolean NOT NULL,                                 -- [DECISION]
     score          double precision,                                 -- [V12] continuum_eval_score is a required metric
@@ -554,9 +617,11 @@ CREATE TABLE continuum.evaluation_results (
 ```sql
 CREATE TABLE continuum.mutations (
     id               uuid PRIMARY KEY,                               -- [V12] named table
-    workspace_id     uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id     uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     class            continuum.mutation_class NOT NULL,              -- [V12] mutation classes, verbatim
-    parent_id        uuid REFERENCES continuum.mutations(id),        -- [V12] "full parent/eval/canary/approval/rollback lineage"
+    parent_id        uuid,        -- [V12] "full parent/eval/canary/approval/rollback lineage"
+    FOREIGN KEY (workspace_id, parent_id)
+        REFERENCES continuum.mutations (workspace_id, id),
     target_type      text NOT NULL,                                  -- [DERIVED]
     target_id        uuid NOT NULL,                                  -- [DERIVED]
     hypothesis       text NOT NULL,                                  -- [V12] coefficients are "versioned hypotheses"
@@ -567,13 +632,18 @@ CREATE TABLE continuum.mutations (
     rolled_back_at   timestamptz,                                    -- [V12] rollback must be demonstrated
     created_at       timestamptz NOT NULL DEFAULT now(),             -- [V11]
     -- [V12] fully autonomous production promotion is outside v1.2
-    CHECK (stage <> 'promoted' OR approved_by IS NOT NULL)
+    CHECK (stage <> 'promoted' OR approved_by IS NOT NULL),
+    UNIQUE (workspace_id, id)                                        -- [DERIVED] tenant-qualified key
 );
 
 CREATE TABLE continuum.mutation_evaluations (
-    mutation_id        uuid NOT NULL REFERENCES continuum.mutations(id) ON DELETE CASCADE,
-    evaluation_id      uuid NOT NULL REFERENCES continuum.evaluations(id) ON DELETE CASCADE,
-    workspace_id       uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    mutation_id        uuid NOT NULL,
+    FOREIGN KEY (workspace_id, mutation_id)
+        REFERENCES continuum.mutations (workspace_id, id) ON DELETE CASCADE,
+    evaluation_id      uuid NOT NULL,
+    FOREIGN KEY (workspace_id, evaluation_id)
+        REFERENCES continuum.evaluations (workspace_id, id) ON DELETE CASCADE,
+    workspace_id       uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     arm                text NOT NULL CHECK (arm IN ('control','variant')),   -- [DERIVED] experiment arms
     quality_delta_pp   double precision,                             -- [V12] quality delta >= -0.5 pp
     quality_ci_low_pp  double precision,                             -- [V12] lower 95% CI bound
@@ -598,7 +668,9 @@ Column set follows the v1.2 artifact manifest JSON Schema. `[V12]`
 CREATE TABLE continuum.artifacts (
     id                  uuid PRIMARY KEY,                            -- [V12] manifest artifact_id
     workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id              uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [V12] nullable in manifest
+    run_id              uuid,  -- [V12] nullable in manifest
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     kind                text NOT NULL,                               -- [V12]
     media_type          text NOT NULL,                               -- [V12]
     filename            text,                                        -- [V12] nullable in manifest
@@ -634,7 +706,9 @@ provider, SKU, quantity, unit, unit price, timestamp, run, workspace, cost. `[V1
 CREATE TABLE continuum.cost_events (
     id            uuid PRIMARY KEY,                                  -- [V12] named table
     workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,  -- [V12]
-    run_id        uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [V12]
+    run_id        uuid,  -- [V12]
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     provider      text NOT NULL,                                     -- [V12]
     sku           text NOT NULL,                                     -- [V12]
     component     text NOT NULL                                      -- [V12] COGS components
@@ -667,7 +741,9 @@ CREATE TABLE continuum.events (
     sequence            bigserial PRIMARY KEY,                       -- [V11] run_events.sequence
     event_id            uuid NOT NULL UNIQUE,                        -- [V12] field, [V11] UNIQUE
     workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id),  -- [V12] field
-    run_id              uuid REFERENCES continuum.runs(id),          -- [V12] field
+    run_id              uuid,          -- [V12] field
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id),
     event_type          text NOT NULL,                               -- [V12] field
     schema_version      integer NOT NULL,                            -- [V12] field, [V11] INTEGER
     aggregate_type      text NOT NULL,                               -- [V12] field
@@ -848,6 +924,20 @@ than RLS. `[DECISION]`
 
 Because `continuum.current_workspace_id()` returns `NULL` when `app.workspace_id`
 is unset, every policy fails closed. `[V12]`
+
+**RLS is not sufficient on its own.** PostgreSQL evaluates referential
+integrity with row security suspended — the documented behaviour, so that a
+foreign key cannot be defeated by a policy. The consequence is that a tenant
+which cannot *read* another tenant's row can still *reference* it: the hard
+gate of zero cross-workspace access is not reachable by policies alone. Every
+foreign key naming a tenant-scoped parent therefore names it by
+`(workspace_id, id)`. `[DECISION: ADR-0006]`
+
+`agents` and `agent_versions` previously allowed `workspace_id IS NULL` to mean
+a built-in shared by every tenant, and carried a second read policy admitting
+those rows. Both are withdrawn: under `MATCH SIMPLE` a NULL in a referencing
+column skips the composite check entirely, so a nullable `workspace_id` is the
+one thing that reopens the hole the composite keys close. `[DECISION: ADR-0006]`
 
 ### 4.3 Artifact retention
 
@@ -1110,8 +1200,12 @@ Constraints these must satisfy, all `[V12]`:
 5. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
 6. **Language dependency versions** (§6.2) — deliberately unpinned here.
 7. **`users` / `models` exemption from RLS** (§5).
-8. **Built-in agent visibility** (§5) — `workspace_id IS NULL` rows are readable
-   by every tenant under a dedicated read policy.
+8. ~~**Built-in agent visibility** (§5)~~ — **RESOLVED by ADR-0006.**
+   Withdrawn rather than approved. A nullable `workspace_id` is what let a
+   row escape a tenant-qualified foreign key under `MATCH SIMPLE`, so the
+   shared catalogue and the composite keys could not both stand. Every
+   tenant-scoped row now names its workspace, and the read policy that
+   admitted `workspace_id IS NULL` is gone with it.
 9. **Role and function names** — already approved under ADR-0001.
 
 **Complete enumeration.** The list below is generated from the

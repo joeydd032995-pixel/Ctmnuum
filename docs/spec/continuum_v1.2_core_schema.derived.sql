@@ -172,18 +172,23 @@ CREATE INDEX runs_workspace_created_idx
 
 CREATE TABLE continuum.agents (
     id           uuid PRIMARY KEY,                                    -- [V12]
-    workspace_id uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     name         text NOT NULL,                                       -- [DECISION]
     role         text NOT NULL,                                       -- [V12] agent roles named
     status       text NOT NULL DEFAULT 'active',                      -- [DECISION]
     created_at   timestamptz NOT NULL DEFAULT now(),                  -- [V11]
-    UNIQUE (workspace_id, name)                                       -- [DECISION]
+    UNIQUE (workspace_id, name),                                      -- [DECISION]
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.agent_versions (
     id                 uuid PRIMARY KEY,                              -- [V12] agent_version_id
-    agent_id           uuid NOT NULL REFERENCES continuum.agents(id) ON DELETE CASCADE,
-    workspace_id       uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    agent_id           uuid NOT NULL,                                 -- [V12]
+    workspace_id       uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, agent_id)
+        REFERENCES continuum.agents (workspace_id, id) ON DELETE CASCADE,
     version            integer NOT NULL,                              -- [DERIVED]
     prompt_hash        char(64) NOT NULL,                             -- [DERIVED] prompts are versioned
     prompt_artifact_id uuid,                                          -- [V12] >256 KiB to S3
@@ -191,7 +196,9 @@ CREATE TABLE continuum.agent_versions (
     output_schema_id   text,                                          -- [V12] ExecuteAgentInput
     status             continuum.promotion_stage NOT NULL DEFAULT 'promoted',  -- [DERIVED]
     created_at         timestamptz NOT NULL DEFAULT now(),            -- [V11]
-    UNIQUE (agent_id, version)                                        -- [DERIVED]
+    UNIQUE (agent_id, version),                                       -- [DERIVED]
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 -- ---------------------------------------------------------------------------
@@ -214,7 +221,7 @@ CREATE TABLE continuum.models (
 CREATE TABLE continuum.model_metrics (
     id                uuid PRIMARY KEY,                               -- [V12]
     model_id          uuid NOT NULL REFERENCES continuum.models(id) ON DELETE CASCADE,
-    workspace_id      uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id      uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     task_family       text NOT NULL,                                  -- [V12] ModelRequest.task_family
     window_start      timestamptz NOT NULL,                           -- [DECISION]
     window_end        timestamptz NOT NULL,                           -- [DECISION]
@@ -235,7 +242,15 @@ CREATE TABLE continuum.model_metrics (
 CREATE TABLE continuum.evidence (
     id                  uuid PRIMARY KEY,                             -- [V11] Evidence.id
     workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id              uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id              uuid,                                         -- [V11]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    --
+    -- The (run_id) column list is load-bearing. A bare ON DELETE SET NULL
+    -- nulls EVERY referencing column, workspace_id included -- and that
+    -- column is NOT NULL here and is the RLS discriminator, so the delete
+    -- would fail at best and silently unscope the row at worst.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     type                continuum.evidence_type NOT NULL,             -- [V11]
     uri                 text,                                         -- [V11]
     content_hash        char(64) NOT NULL,                            -- [V11]
@@ -255,14 +270,20 @@ CREATE TABLE continuum.evidence (
 CREATE TABLE continuum.claims (
     id                       uuid PRIMARY KEY,                        -- [V11] Claim.id
     workspace_id             uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id                   uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id                   uuid,                                    -- [V11]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     statement                text NOT NULL,                           -- [V11]
     status                   continuum.claim_status NOT NULL,         -- [V11]
     confidence               double precision NOT NULL                -- [V11] ge=0 le=1
         CHECK (confidence BETWEEN 0 AND 1),
     assumptions              text[] NOT NULL DEFAULT '{}',            -- [V11]
     falsification_conditions text[] NOT NULL DEFAULT '{}',            -- [V11]
-    created_by_agent_version uuid REFERENCES continuum.agent_versions(id),  -- [V11]
+    created_by_agent_version uuid,                                    -- [V11]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, created_by_agent_version)
+        REFERENCES continuum.agent_versions (workspace_id, id),
     superseded_by            uuid,                                    -- [DERIVED]
     trace_id                 char(32),                                -- [V11]
     created_at               timestamptz NOT NULL DEFAULT now(),       -- [V11]
@@ -314,7 +335,10 @@ CREATE TABLE continuum.memories (
         CHECK (freshness_class IN ('highly_dynamic','dynamic','slow_changing','stable')),
     salience            double precision CHECK (salience BETWEEN 0 AND 1),  -- [V12]
     utility             double precision CHECK (utility BETWEEN 0 AND 1),   -- [V12]
-    source_run_id       uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,  -- [DERIVED]
+    source_run_id       uuid,                                         -- [DERIVED]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, source_run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (source_run_id),
     -- [DERIVED] generated, not plain. As a bare column this was declared and
     -- indexed but never populated by anything, so the v1.2 lexical-retrieval
     -- half of hybrid search would have matched nothing.
@@ -378,6 +402,15 @@ ALTER TABLE continuum.memory_embeddings
     FOREIGN KEY (workspace_id, memory_id)
     REFERENCES continuum.memories(workspace_id, id) ON DELETE CASCADE;
 
+-- [DERIVED] and the single-column FK the verbatim block declares is now
+-- redundant: both of its columns are NOT NULL, so the composite constraint
+-- above checks everything it checked and the tenancy besides. Left in place
+-- it is a second per-row referential trigger that proves nothing, and it is
+-- the one remaining foreign key in this schema that names a tenant-scoped
+-- parent by id alone -- which assertion 33 rejects on sight.
+ALTER TABLE continuum.memory_embeddings
+    DROP CONSTRAINT memory_embeddings_memory_id_fkey;
+
 -- [V11] knowledge_edges shape, identical in v1.0 and v1.1
 CREATE TABLE continuum.memory_edges (
     id           uuid PRIMARY KEY,
@@ -405,7 +438,10 @@ CREATE INDEX memory_edges_target_idx
 CREATE TABLE continuum.failures (
     id                   uuid PRIMARY KEY,                            -- [V12]
     workspace_id         uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id               uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id               uuid,                                        -- [V11]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     task_type            text NOT NULL,                               -- [V11]
     observed_failure     text NOT NULL,                               -- [V11]
     expected_behavior    text NOT NULL,                               -- [V11]
@@ -425,18 +461,23 @@ CREATE TABLE continuum.failures (
 
 CREATE TABLE continuum.tools (
     id           uuid PRIMARY KEY,                                    -- [V12]
-    workspace_id uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     name         text NOT NULL CHECK (name ~ '^[a-z0-9][a-z0-9._-]{2,127}$'),  -- [V12] verbatim
     purpose      text NOT NULL CHECK (length(purpose) >= 8),          -- [V12] minLength 8
     status       text NOT NULL DEFAULT 'active',                      -- [DECISION]
     created_at   timestamptz NOT NULL DEFAULT now(),                  -- [V11]
-    UNIQUE (workspace_id, name)                                       -- [DERIVED]
+    UNIQUE (workspace_id, name),                                      -- [DERIVED]
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.tool_versions (
     id                   uuid PRIMARY KEY,                            -- [V12]
-    tool_id              uuid NOT NULL REFERENCES continuum.tools(id) ON DELETE CASCADE,
-    workspace_id         uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    tool_id              uuid NOT NULL,                               -- [V12]
+    workspace_id         uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, tool_id)
+        REFERENCES continuum.tools (workspace_id, id) ON DELETE CASCADE,
     version              text NOT NULL                                -- [V12] semver, verbatim
         CHECK (version ~ '^[0-9]+\.[0-9]+\.[0-9]+$'),
     risk_level           smallint NOT NULL CHECK (risk_level BETWEEN 0 AND 4),  -- [V12]
@@ -464,14 +505,21 @@ CREATE TABLE continuum.tool_versions (
     -- would silently admit exactly the row it is meant to block.
     CHECK (promotion_stage <> 'promoted'
            OR (image_digest IS NOT NULL
-               AND image_digest ~ '^sha256:[0-9a-f]{64}$'))
+               AND image_digest ~ '^sha256:[0-9a-f]{64}$')),
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.tool_executions (
     id                 uuid PRIMARY KEY,                              -- [V12]
     workspace_id       uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    tool_version_id    uuid NOT NULL REFERENCES continuum.tool_versions(id),
-    run_id             uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    tool_version_id    uuid NOT NULL,                                 -- [V12]
+    run_id             uuid,                                          -- [V12]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, tool_version_id)
+        REFERENCES continuum.tool_versions (workspace_id, id),
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     idempotency_key    text NOT NULL,                                 -- [V12]
     status             text NOT NULL,                                 -- [DECISION]
     exit_code          integer,                                       -- [V12] ExecResult
@@ -520,7 +568,7 @@ CREATE TRIGGER tool_executions_require_approval
 
 CREATE TABLE continuum.evaluations (
     id            uuid PRIMARY KEY,                                   -- [V12]
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     suite         text NOT NULL,                                      -- [V12] suite names
     suite_version text NOT NULL,                                      -- [V12] evaluators versioned
     target_type   text NOT NULL,                                      -- [DERIVED]
@@ -528,13 +576,18 @@ CREATE TABLE continuum.evaluations (
     status        text NOT NULL DEFAULT 'pending',                    -- [DECISION]
     started_at    timestamptz,                                        -- [DECISION]
     completed_at  timestamptz,                                        -- [DECISION]
-    created_at    timestamptz NOT NULL DEFAULT now()                  -- [V11]
+    created_at    timestamptz NOT NULL DEFAULT now(),                 -- [V11]
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.evaluation_results (
     id            uuid PRIMARY KEY,                                   -- [V12]
-    evaluation_id uuid NOT NULL REFERENCES continuum.evaluations(id) ON DELETE CASCADE,
-    workspace_id  uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    evaluation_id uuid NOT NULL,                                      -- [V12]
+    workspace_id  uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, evaluation_id)
+        REFERENCES continuum.evaluations (workspace_id, id) ON DELETE CASCADE,
     case_id       text NOT NULL,                                      -- [DERIVED]
     passed        boolean NOT NULL,                                   -- [DECISION]
     score         double precision,                                   -- [V12] continuum_eval_score
@@ -550,9 +603,12 @@ CREATE TABLE continuum.evaluation_results (
 
 CREATE TABLE continuum.mutations (
     id             uuid PRIMARY KEY,                                  -- [V12]
-    workspace_id   uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    workspace_id   uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
     class          continuum.mutation_class NOT NULL,                 -- [V12] verbatim
-    parent_id      uuid REFERENCES continuum.mutations(id),           -- [V12] lineage gate
+    parent_id      uuid,                                              -- [V12] lineage gate
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, parent_id)
+        REFERENCES continuum.mutations (workspace_id, id),
     target_type    text NOT NULL,                                     -- [DERIVED]
     target_id      uuid NOT NULL,                                     -- [DERIVED]
     hypothesis     text NOT NULL,                                     -- [V12] versioned hypotheses
@@ -563,13 +619,20 @@ CREATE TABLE continuum.mutations (
     rolled_back_at timestamptz,                                       -- [V12]
     created_at     timestamptz NOT NULL DEFAULT now(),                -- [V11]
     CHECK (stage <> 'promoted' OR approved_by IS NOT NULL),  -- [DERIVED] no autonomous promotion
-    CHECK ((approved_by IS NULL) = (approved_at IS NULL))    -- [DERIVED] approval is atomic
+    CHECK ((approved_by IS NULL) = (approved_at IS NULL)),   -- [DERIVED] approval is atomic
+    -- [DERIVED] tenant-qualified key so children can reference (workspace_id, id)
+    UNIQUE (workspace_id, id)
 );
 
 CREATE TABLE continuum.mutation_evaluations (
-    mutation_id        uuid NOT NULL REFERENCES continuum.mutations(id) ON DELETE CASCADE,
-    evaluation_id      uuid NOT NULL REFERENCES continuum.evaluations(id) ON DELETE CASCADE,
-    workspace_id       uuid REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    mutation_id        uuid NOT NULL,                                 -- [V12]
+    evaluation_id      uuid NOT NULL,                                 -- [V12]
+    workspace_id       uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, mutation_id)
+        REFERENCES continuum.mutations (workspace_id, id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, evaluation_id)
+        REFERENCES continuum.evaluations (workspace_id, id) ON DELETE CASCADE,
     arm                text NOT NULL CHECK (arm IN ('control','variant')),  -- [DERIVED]
     quality_delta_pp   double precision,                              -- [V12] >= -0.5 pp
     quality_ci_low_pp  double precision,                              -- [V12] 95% CI bound
@@ -587,7 +650,10 @@ CREATE TABLE continuum.mutation_evaluations (
 CREATE TABLE continuum.artifacts (
     id                  uuid PRIMARY KEY,                             -- [V12] artifact_id
     workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id              uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id              uuid,                                         -- [V12]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     kind                text NOT NULL,                                -- [V12]
     media_type          text NOT NULL,                                -- [V12]
     filename            text,                                         -- [V12] nullable
@@ -645,7 +711,10 @@ CREATE INDEX artifacts_sha_idx ON continuum.artifacts (workspace_id, sha256);  -
 CREATE TABLE continuum.cost_events (
     id                    uuid PRIMARY KEY,                           -- [V12]
     workspace_id          uuid NOT NULL REFERENCES continuum.workspaces(id) ON DELETE CASCADE,
-    run_id                uuid REFERENCES continuum.runs(id) ON DELETE SET NULL,
+    run_id                uuid,                                       -- [V12]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id) ON DELETE SET NULL (run_id),
     provider              text NOT NULL,                              -- [V12]
     sku                   text NOT NULL,                              -- [V12]
     component             text NOT NULL                               -- [V12] COGS components
@@ -678,7 +747,12 @@ CREATE TABLE continuum.events (
     sequence            bigserial PRIMARY KEY,                        -- [V11 shape]
     event_id            uuid NOT NULL UNIQUE,                         -- [V12 name] [V11 shape]
     workspace_id        uuid NOT NULL REFERENCES continuum.workspaces(id),  -- [V12 name] [DERIVED shape]
-    run_id              uuid REFERENCES continuum.runs(id),           -- [V12 name] [DERIVED shape]
+    run_id              uuid,                                         -- [V12 name] [DERIVED shape]
+    -- [DERIVED] tenant-qualified parent reference; see claim_evidence.
+    -- NO ACTION rather than SET NULL: this table is append-only, and a
+    -- SET NULL would issue the UPDATE that events_reject_mutation blocks.
+    FOREIGN KEY (workspace_id, run_id)
+        REFERENCES continuum.runs (workspace_id, id),
     event_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     schema_version      integer NOT NULL,                             -- [V12 name] [V11 shape]
     aggregate_type      text NOT NULL,                                -- [V12 name] [DERIVED shape]
@@ -1060,6 +1134,21 @@ GRANT INSERT, SELECT ON continuum.events TO continuum_app;
 -- without sequence USAGE every application insert fails on permissions.
 GRANT USAGE ON SEQUENCE continuum.events_sequence_seq TO continuum_app;
 
+-- [DERIVED] Referencing-side indexes for the tenant-qualified foreign keys.
+-- ON DELETE CASCADE and ON DELETE SET NULL make PostgreSQL find the children of
+-- a deleted parent; without an index leading with the referencing columns that
+-- search is a sequential scan of the child table. Nothing may delete a domain
+-- row today (ADR-0003), so these buy nothing yet -- they exist so that the
+-- referential actions already declared above are not a latent table scan.
+CREATE INDEX evidence_run_idx        ON continuum.evidence (workspace_id, run_id);
+CREATE INDEX claims_run_idx          ON continuum.claims (workspace_id, run_id);
+CREATE INDEX memories_source_run_idx ON continuum.memories (workspace_id, source_run_id);
+CREATE INDEX failures_run_idx        ON continuum.failures (workspace_id, run_id);
+CREATE INDEX tool_executions_run_idx ON continuum.tool_executions (workspace_id, run_id);
+CREATE INDEX artifacts_run_idx       ON continuum.artifacts (workspace_id, run_id);
+CREATE INDEX mutation_evaluations_evaluation_idx
+    ON continuum.mutation_evaluations (workspace_id, evaluation_id);
+
 -- ---------------------------------------------------------------------------
 -- 16. Row Level Security                                               [V12]
 -- ---------------------------------------------------------------------------
@@ -1075,7 +1164,7 @@ DO $$
 DECLARE
     t text;
     tenant_tables text[] := ARRAY[
-        'workspace_members','runs','model_metrics',
+        'workspace_members','runs','agents','agent_versions','model_metrics',
         'evidence','claims','claim_evidence','memories','memory_embeddings',
         'memory_edges','failures','tools','tool_versions','tool_executions',
         'evaluations','evaluation_results','mutations','mutation_evaluations',
@@ -1094,29 +1183,13 @@ BEGIN
 END
 $$;
 
--- [DERIVED] agents and agent_versions allow workspace_id IS NULL to mean a
--- built-in shared by every tenant. Under the uniform predicate
--- `workspace_id = current_workspace_id()` a NULL never compares true, so every
--- built-in agent would be invisible to every tenant. Reads therefore admit
--- built-ins; writes stay tenant-only.
-DO $$
-DECLARE t text;
-BEGIN
-    FOREACH t IN ARRAY ARRAY['agents','agent_versions'] LOOP
-        EXECUTE format('ALTER TABLE continuum.%I ENABLE ROW LEVEL SECURITY', t);
-        EXECUTE format('ALTER TABLE continuum.%I FORCE ROW LEVEL SECURITY', t);
-        EXECUTE format(
-            'CREATE POLICY %I ON continuum.%I FOR SELECT '
-            'USING (workspace_id = (SELECT continuum.current_workspace_id()) '
-            '       OR workspace_id IS NULL)', t || '_read', t);
-        EXECUTE format(
-            'CREATE POLICY %I ON continuum.%I FOR ALL '
-            'USING (workspace_id = (SELECT continuum.current_workspace_id())) '
-            'WITH CHECK (workspace_id = (SELECT continuum.current_workspace_id()))',
-            t || '_write', t);
-    END LOOP;
-END
-$$;
+-- [DECISION: ADR-0006] agents and agent_versions once allowed
+-- workspace_id IS NULL to mean a built-in shared by every tenant, and carried
+-- a second policy admitting those rows on read. Both are gone: every
+-- tenant-scoped row now names its workspace, so the disjunct
+-- `OR workspace_id IS NULL` could never be true, and a policy clause that
+-- cannot be true is decoration. See ADR-0006 for why the shared catalogue
+-- was dropped rather than kept.
 
 -- [DERIVED] workspaces is the tenant root: its own primary key is the tenant
 -- discriminator, so it needs a policy on `id` rather than `workspace_id`.

@@ -150,21 +150,22 @@ END
 $$;
 
 -- 7. Risk-3/4 tools cannot exist without approval_required             [V12]
-INSERT INTO continuum.tools (id, name, purpose)
-VALUES ('00000000-0000-0000-0000-0000000000b1', 'verify-tool', 'verification tool')
+INSERT INTO continuum.tools (id, workspace_id, name, purpose)
+VALUES ('00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000aa',
+        'verify-tool', 'verification tool')
 ON CONFLICT DO NOTHING;
 
 DO $$
 BEGIN
     BEGIN
         INSERT INTO continuum.tool_versions (
-            id, tool_id, version, risk_level, side_effect,
+            id, tool_id, workspace_id, version, risk_level, side_effect,
             idempotency_required, idempotency_strategy,
             permissions, resources, approval_required,
             input_schema, output_schema, manifest_hash
         ) VALUES (
             '00000000-0000-0000-0000-0000000000c1',
-            '00000000-0000-0000-0000-0000000000b1',
+            '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000aa',
             '1.0.0', 4, 'irreversible_external_write',
             true, 'caller_key',
             '{}'::jsonb, '{}'::jsonb, false,       -- risk 4 without approval
@@ -182,9 +183,9 @@ DO $$
 BEGIN
     BEGIN
         INSERT INTO continuum.mutations (
-            id, class, target_type, target_id, hypothesis, stage
+            id, workspace_id, class, target_type, target_id, hypothesis, stage
         ) VALUES (
-            '00000000-0000-0000-0000-0000000000d1',
+            '00000000-0000-0000-0000-0000000000d1', '00000000-0000-0000-0000-0000000000aa',
             'prompt', 'agent_version',
             '00000000-0000-0000-0000-0000000000aa',
             'autonomous promotion attempt', 'promoted'
@@ -242,13 +243,13 @@ DO $$
 BEGIN
     BEGIN
         INSERT INTO continuum.tool_versions (
-            id, tool_id, version, risk_level, side_effect,
+            id, tool_id, workspace_id, version, risk_level, side_effect,
             idempotency_required, idempotency_strategy,
             permissions, resources, approval_required,
             input_schema, output_schema, manifest_hash, promotion_stage
         ) VALUES (
             '00000000-0000-0000-0000-0000000000c2',
-            '00000000-0000-0000-0000-0000000000b1',
+            '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000aa',
             '1.0.1', 1, 'none', true, 'caller_key',
             '{}'::jsonb, '{}'::jsonb, false,
             '{}'::jsonb, '{}'::jsonb, repeat('0', 64), 'promoted'
@@ -262,13 +263,13 @@ $$;
 
 -- 11b. ...but a promoted version WITH a valid digest is accepted     [DERIVED]
 INSERT INTO continuum.tool_versions (
-    id, tool_id, version, risk_level, side_effect,
+    id, tool_id, workspace_id, version, risk_level, side_effect,
     idempotency_required, idempotency_strategy,
     permissions, resources, approval_required,
     input_schema, output_schema, manifest_hash, promotion_stage, image_digest
 ) VALUES (
     '00000000-0000-0000-0000-0000000000c4',
-    '00000000-0000-0000-0000-0000000000b1',
+    '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000aa',
     '1.0.2', 1, 'none', true, 'caller_key',
     '{}'::jsonb, '{}'::jsonb, false,
     '{}'::jsonb, '{}'::jsonb, repeat('0', 64), 'promoted',
@@ -283,13 +284,13 @@ $$;
 
 -- 12. A risk-3/4 execution cannot be recorded without an approval        [V12]
 INSERT INTO continuum.tool_versions (
-    id, tool_id, version, risk_level, side_effect,
+    id, tool_id, workspace_id, version, risk_level, side_effect,
     idempotency_required, idempotency_strategy,
     permissions, resources, approval_required,
     input_schema, output_schema, manifest_hash
 ) VALUES (
     '00000000-0000-0000-0000-0000000000c3',
-    '00000000-0000-0000-0000-0000000000b1',
+    '00000000-0000-0000-0000-0000000000b1', '00000000-0000-0000-0000-0000000000aa',
     '2.0.0', 4, 'irreversible_external_write', true, 'caller_key',
     '{}'::jsonb, '{}'::jsonb, true,
     '{}'::jsonb, '{}'::jsonb, repeat('0', 64)
@@ -313,17 +314,29 @@ BEGIN
 END
 $$;
 
--- 13. Built-in agents (workspace_id IS NULL) remain readable            [DERIVED]
+-- 13. No policy admits a workspace-less row.
+--
+--     This assertion previously required the opposite: that the agents read
+--     policy carry `OR workspace_id IS NULL`, so that built-ins shared by
+--     every tenant stayed visible. ADR-0006 withdraws the shared catalogue,
+--     because a NULL workspace_id is precisely what lets a row slip past a
+--     tenant-qualified foreign key under MATCH SIMPLE. The slot is inverted
+--     rather than deleted, so that the disjunct cannot quietly return.
+--     [DECISION: ADR-0006]
 DO $$
+DECLARE
+    admitting text;
 BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_policies
-        WHERE schemaname='continuum' AND tablename='agents'
-          AND policyname='agents_read' AND qual LIKE '%IS NULL%'
-    ) THEN
-        RAISE EXCEPTION 'built-in agents would be invisible to every tenant';
+    SELECT string_agg(tablename || '.' || policyname, ', ' ORDER BY policyname)
+      INTO admitting
+      FROM pg_policies
+     WHERE schemaname = 'continuum'
+       AND (qual LIKE '%workspace_id IS NULL%'
+            OR with_check LIKE '%workspace_id IS NULL%');
+    IF admitting IS NOT NULL THEN
+        RAISE EXCEPTION 'policy admits a workspace-less row: %', admitting;
     END IF;
-    RAISE NOTICE 'built-in agents remain readable under the tenant policy';
+    RAISE NOTICE 'no policy admits a row without a workspace';
 END
 $$;
 
@@ -621,12 +634,6 @@ BEGIN
 END
 $$;
 
--- A built-in agent: workspace_id IS NULL means shared by every tenant.
--- Assertion 13 checks only that the policy TEXT mentions IS NULL; assertion 23
--- below reads this row as an ordinary tenant, which is the actual claim.
-INSERT INTO continuum.agents (id, workspace_id, name, role)
-VALUES ('00000000-0000-0000-0000-0000000000d1', NULL, 'builtin-falsifier', 'falsifier');
-
 -- 23. Tenant isolation is enforced in BEHAVIOUR, not merely configured.
 --
 --     Assertion 5 checks pg_class.relrowsecurity and relforcerowsecurity: it
@@ -646,7 +653,6 @@ DECLARE
     seen_own   integer;
     seen_other integer;
     seen_unset integer;
-    builtin    integer;
 BEGIN
     SET LOCAL ROLE continuum_app;
 
@@ -675,13 +681,6 @@ BEGIN
     EXCEPTION WHEN insufficient_privilege THEN
         NULL;
     END;
-
-    -- Built-in agents (workspace_id IS NULL) stay readable to every tenant.
-    SELECT count(*) INTO builtin
-      FROM continuum.agents WHERE workspace_id IS NULL;
-    IF builtin = 0 THEN
-        RAISE EXCEPTION 'built-in agents are invisible to a tenant under RLS';
-    END IF;
 
     -- Fail closed: no tenant context must expose nothing, not everything.
     PERFORM set_config('app.workspace_id', '', true);
@@ -1072,6 +1071,242 @@ BEGIN
 
     RAISE NOTICE
         'expiry eligibility is structural: expired offered, held and unexpired never, removed drops out';
+END
+$$;
+
+-- 31. A child row cannot reference a parent in another workspace, on a
+--     relationship that cascades. Assertion 10 proves this for the one
+--     composite foreign key v1.2's own DDL implies; this proves it for a
+--     relationship v1.2 left qualified by id alone.
+--     [DECISION: ADR-0006]
+INSERT INTO continuum.agents (id, workspace_id, name, role)
+VALUES ('00000000-0000-0000-0000-000000003101', '00000000-0000-0000-0000-0000000000aa',
+        'tenant-a-agent', 'planner');
+
+DO $$
+BEGIN
+    BEGIN
+        -- a workspace B agent_version naming workspace A's agent
+        INSERT INTO continuum.agent_versions
+            (id, agent_id, workspace_id, version, prompt_hash)
+        VALUES ('00000000-0000-0000-0000-000000003102',
+                '00000000-0000-0000-0000-000000003101',
+                '00000000-0000-0000-0000-0000000000bb', 1, repeat('0', 64));
+        RAISE EXCEPTION 'cross-workspace parent reference was accepted on a cascading FK';
+    EXCEPTION WHEN foreign_key_violation THEN
+        RAISE NOTICE 'cross-workspace agent_versions -> agents: rejected';
+    END;
+
+    -- the same-workspace reference must still be accepted, or the constraint is
+    -- not isolating anything, it is merely broken
+    INSERT INTO continuum.agent_versions
+        (id, agent_id, workspace_id, version, prompt_hash)
+    VALUES ('00000000-0000-0000-0000-000000003103',
+            '00000000-0000-0000-0000-000000003101',
+            '00000000-0000-0000-0000-0000000000aa', 1, repeat('0', 64));
+    RAISE NOTICE 'same-workspace agent_versions -> agents: accepted';
+END
+$$;
+
+-- 32. The same, executed as continuum_app -- which is the assertion that
+--     matters.
+--
+--     PostgreSQL evaluates referential integrity with row security suspended,
+--     by design: "referential integrity checks ... always bypass row security
+--     to ensure that data integrity is maintained." So a tenant that cannot
+--     SELECT another tenant's run can still successfully name it in a foreign
+--     key. That is the path an application actually takes, and no assertion
+--     before this one covered it -- assertion 31 runs as the owner, where the
+--     RLS interaction never arises. Before ADR-0006 this insert was accepted:
+--     workspace B could not see workspace A's run and could reference it
+--     anyway.
+--     [DECISION: ADR-0006]
+INSERT INTO continuum.runs (id, workspace_id, objective)
+VALUES ('00000000-0000-0000-0000-000000003201', '00000000-0000-0000-0000-0000000000aa',
+        'tenant A run');
+
+DO $$
+DECLARE
+    visible integer;
+BEGIN
+    SET LOCAL ROLE continuum_app;
+    PERFORM set_config('app.workspace_id',
+                       '00000000-0000-0000-0000-0000000000bb', true);
+
+    -- the premise: B genuinely cannot read the row it is about to reference
+    SELECT count(*) INTO visible FROM continuum.runs
+     WHERE id = '00000000-0000-0000-0000-000000003201';
+    IF visible <> 0 THEN
+        RAISE EXCEPTION
+            'premise failed: workspace A run is visible to workspace B (% rows)', visible;
+    END IF;
+
+    BEGIN
+        INSERT INTO continuum.failures
+            (id, workspace_id, run_id, task_type, observed_failure,
+             expected_behavior, severity)
+        VALUES ('00000000-0000-0000-0000-000000003202',
+                '00000000-0000-0000-0000-0000000000bb',
+                '00000000-0000-0000-0000-000000003201',
+                'verify', 'observed', 'expected', 1);
+        RAISE EXCEPTION
+            'continuum_app referenced another workspace''s run through the RI bypass';
+    EXCEPTION WHEN foreign_key_violation THEN
+        RAISE NOTICE
+            'continuum_app cannot reference an invisible cross-tenant parent: rejected';
+    END;
+    RESET ROLE;
+END
+$$;
+
+-- 33. No foreign key anywhere in the schema names a tenant-scoped parent
+--     without naming the workspace.
+--
+--     Assertions 31 and 32 test two relationships. This one tests the rule, and
+--     is the only one of the three that constrains a foreign key nobody has
+--     written yet: a future ALTER TABLE adding `REFERENCES continuum.runs (id)`
+--     reopens the hole, and neither behavioural assertion would notice.
+--     [DECISION: ADR-0006]
+DO $$
+DECLARE
+    offenders text;
+BEGIN
+    SELECT string_agg(format('%s.%s -> %s',
+                             c.conrelid::regclass, c.conname, c.confrelid::regclass),
+                      ', ' ORDER BY c.conname)
+      INTO offenders
+      FROM pg_constraint c
+     WHERE c.contype = 'f'
+       AND c.connamespace = 'continuum'::regnamespace
+       -- the parent is tenant-scoped: it carries a workspace_id of its own.
+       -- References to workspaces, users, models and event_schemas are not,
+       -- and are excluded by this test rather than by an exemption list.
+       AND EXISTS (
+           SELECT 1 FROM pg_attribute pa
+            WHERE pa.attrelid = c.confrelid AND pa.attname = 'workspace_id'
+              AND pa.attnum > 0 AND NOT pa.attisdropped)
+       -- ...and this constraint does not tie the child's own workspace_id to it.
+       --
+       -- Matching by ordinal, not by membership. Asking only whether the parent's
+       -- workspace_id appears somewhere in confkey accepts a constraint that
+       -- names it from the wrong child column:
+       --
+       --     FOREIGN KEY (id, run_id) REFERENCES continuum.runs (workspace_id, id)
+       --
+       -- which is satisfied by putting another tenant's workspace UUID in `id`,
+       -- and leaves the cross-tenant reference wide open. The child column at the
+       -- position where the parent names workspace_id must be workspace_id too.
+       AND NOT EXISTS (
+           SELECT 1
+             FROM unnest(c.confkey) WITH ORDINALITY AS parent(attnum, ord)
+             JOIN pg_attribute pa
+               ON pa.attrelid = c.confrelid AND pa.attnum = parent.attnum
+             JOIN pg_attribute ca
+               ON ca.attrelid = c.conrelid AND ca.attnum = c.conkey[parent.ord]
+            WHERE pa.attname = 'workspace_id'
+              AND ca.attname = 'workspace_id');
+
+    IF offenders IS NOT NULL THEN
+        RAISE EXCEPTION
+            'foreign key(s) not tying the child workspace_id to the parent''s: %',
+            offenders;
+    END IF;
+    RAISE NOTICE
+        'every foreign key to a tenant-scoped parent is qualified by workspace_id';
+END
+$$;
+
+-- 34. Every tenant-scoped row names its workspace.
+--
+--     Nine of these columns were nullable, with NULL documented as "built-in,
+--     shared by every tenant". A composite foreign key cannot express "the
+--     parent is mine or the parent is global": under MATCH SIMPLE a NULL in any
+--     referencing column skips the check entirely, so a nullable workspace_id
+--     is a hole in assertion 33's guarantee rather than a feature alongside it.
+--     ADR-0006 drops the shared catalogue; this asserts it stays dropped.
+--     [DECISION: ADR-0006]
+DO $$
+DECLARE
+    nullable text;
+BEGIN
+    -- pg_attribute, not information_schema.columns: a view's columns are
+    -- always reported nullable, and continuum.artifacts_due_for_expiry
+    -- would be named as an offender it is not.
+    SELECT string_agg(c.relname, ', ' ORDER BY c.relname) INTO nullable
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'continuum'
+       AND c.relkind = 'r'
+       AND a.attname = 'workspace_id'
+       AND NOT a.attisdropped
+       AND NOT a.attnotnull;
+    IF nullable IS NOT NULL THEN
+        RAISE EXCEPTION 'workspace_id is nullable on: %', nullable;
+    END IF;
+    RAISE NOTICE 'workspace_id is NOT NULL on every table that carries it';
+END
+$$;
+
+-- 35. Deleting a parent nulls the referencing column and nothing else.
+--
+--     `ON DELETE SET NULL` without a column list nulls EVERY referencing
+--     column. On a tenant-qualified foreign key those columns are
+--     (workspace_id, run_id), and workspace_id is NOT NULL and is the RLS
+--     discriminator -- so the omission turns a parent delete into either a
+--     constraint violation or, on a nullable column, a silently unscoped row.
+--     The schema names the column; this proves the name took effect rather
+--     than trusting that it parsed.
+--     [DERIVED]
+DO $$
+DECLARE
+    ws          constant uuid := '00000000-0000-0000-0000-0000000000aa';
+    run         constant uuid := '00000000-0000-0000-0000-000000003501';
+    fail        constant uuid := '00000000-0000-0000-0000-000000003502';
+    surviving   uuid;
+    orphan_run  uuid;
+    still_there integer;
+BEGIN
+    INSERT INTO continuum.runs (id, workspace_id, objective)
+    VALUES (run, ws, 'run to be deleted');
+    INSERT INTO continuum.failures
+        (id, workspace_id, run_id, task_type, observed_failure,
+         expected_behavior, severity)
+    VALUES (fail, ws, run, 'verify', 'observed', 'expected', 1);
+
+    -- Omitting the column list does not produce a wrongly-nulled row here; it
+    -- produces this error, because workspace_id is NOT NULL. Naming the failure
+    -- mode is the point -- an unhandled not-null violation on an unrelated
+    -- DELETE is not obviously a foreign key defect to whoever reads the log.
+    BEGIN
+        DELETE FROM continuum.runs WHERE id = run;
+    EXCEPTION WHEN not_null_violation THEN
+        RAISE EXCEPTION
+            'ON DELETE SET NULL tried to null workspace_id: the constraint is '
+            'missing its column list';
+    END;
+
+    SELECT count(*) INTO still_there FROM continuum.failures WHERE id = fail;
+
+    -- a CASCADE in place of SET NULL takes the child with it, which is a
+    -- different defect and deserves a different message
+    IF still_there <> 1 THEN
+        RAISE EXCEPTION
+            'the child row did not survive its parent; SET NULL behaved as CASCADE';
+    END IF;
+
+    SELECT workspace_id, run_id INTO surviving, orphan_run
+      FROM continuum.failures WHERE id = fail;
+    IF orphan_run IS NOT NULL THEN
+        RAISE EXCEPTION 'run_id survived the parent delete';
+    END IF;
+    IF surviving IS DISTINCT FROM ws THEN
+        RAISE EXCEPTION
+            'workspace_id was nulled by ON DELETE SET NULL (got %), which unscopes the row',
+            surviving;
+    END IF;
+    RAISE NOTICE
+        'ON DELETE SET NULL nulled run_id only; the row survived with its workspace';
 END
 $$;
 

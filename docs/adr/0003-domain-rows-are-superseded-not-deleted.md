@@ -111,11 +111,13 @@ an answer.
 4. **Workspace teardown** — deleting a tenant cascades into the append-only
    event store, so it cannot work by cascade regardless of privileges. Needs its
    own retention decision.
-5. **Composite foreign keys** — `agent_versions.agent_id`,
-   `tool_versions.tool_id`, `evaluation_results.evaluation_id`,
-   `mutation_evaluations.mutation_id` and `.evaluation_id` name their parent by
-   `id` alone and should be qualified by `workspace_id`, as `claim_evidence` and
-   `memory_embeddings` already are. No longer urgent, still a defect.
+5. ~~**Composite foreign keys**~~ — **RESOLVED by ADR-0006.** All sixteen —
+   not the five named here — now name their parent by `(workspace_id, id)`.
+   The entry above called this "no longer urgent" on the grounds that nothing
+   can delete. That was wrong about the defect: the cascade was unreachable,
+   but creating the cross-tenant *reference* never required `DELETE`, and
+   `continuum_app` could do it. Reproduced before the fix, as `continuum_app`
+   scoped to workspace B: A's run invisible (0 rows), and referenced anyway.
 
 ## Verification
 
