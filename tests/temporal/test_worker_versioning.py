@@ -7,8 +7,8 @@ from temporalio.common import VersioningBehavior
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
-from services.orchestrator.temporal.contracts import WorkflowRequest
 from services.orchestrator.temporal import worker as deployment_module
+from services.orchestrator.temporal.contracts import WorkflowRequest
 from services.orchestrator.temporal.runtime import (
     FOUNDATION_TASK_QUEUE,
     FoundationActivity,
@@ -72,27 +72,26 @@ class WorkerVersioningTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(FOUNDATION_TASK_QUEUE, deployment.task_queues)
 
-        async with await WorkflowEnvironment.start_time_skipping() as env:
-            async with Worker(
-                env.client,
-                task_queue=FOUNDATION_TASK_QUEUE,
-                workflows=[FoundationWorkflow],
-                activities=[FoundationActivity.execute],
-                deployment_config=deployment_module.build_temporal_deployment_config(
-                    deployment
+        async with await WorkflowEnvironment.start_time_skipping() as env, Worker(
+            env.client,
+            task_queue=FOUNDATION_TASK_QUEUE,
+            workflows=[FoundationWorkflow],
+            activities=[FoundationActivity.execute],
+            deployment_config=deployment_module.build_temporal_deployment_config(
+                deployment
+            ),
+        ):
+            result = await env.client.execute_workflow(
+                FoundationWorkflow.run,
+                WorkflowRequest(
+                    workspace_id="workspace-versioned",
+                    run_id="run-versioned",
+                    task_id="task-versioned",
+                    objective="verify versioned Foundation worker",
                 ),
-            ):
-                result = await env.client.execute_workflow(
-                    FoundationWorkflow.run,
-                    WorkflowRequest(
-                        workspace_id="workspace-versioned",
-                        run_id="run-versioned",
-                        task_id="task-versioned",
-                        objective="verify versioned Foundation worker",
-                    ),
-                    id="fnd-temp-versioned-worker",
-                    task_queue=FOUNDATION_TASK_QUEUE,
-                )
+                id="fnd-temp-versioned-worker",
+                task_queue=FOUNDATION_TASK_QUEUE,
+            )
 
         self.assertEqual(result.status, "completed")
 

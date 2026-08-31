@@ -291,11 +291,15 @@ def verify_repository(root: Path) -> list[str]:
             in_progress.append(phase_id)
         if predecessor is not None and predecessor not in state.phases:
             errors.append(f"{label}: unknown predecessor '{predecessor}'")
-        if predecessor in state.phases and status in {"in_progress", "accepted"}:
-            if state.phases[predecessor].get("status") != "accepted":
-                errors.append(
-                    f"{label}: predecessor '{predecessor}' must be accepted before status '{status}'"
-                )
+        if (
+            predecessor in state.phases
+            and status in {"in_progress", "accepted"}
+            and state.phases[predecessor].get("status") != "accepted"
+        ):
+            errors.append(
+                f"{label}: predecessor '{predecessor}' must be accepted "
+                f"before status '{status}'"
+            )
         gates = phase.get("acceptance_gates")
         if not isinstance(gates, list):
             errors.append(f"{label}: acceptance_gates must be a list")
@@ -332,7 +336,8 @@ def verify_repository(root: Path) -> list[str]:
                     and other.get("status") != "accepted"
                 ):
                     errors.append(
-                        f"{label}: autonomous capability requires predecessor phase '{other_id}' accepted"
+                        f"{label}: autonomous capability requires predecessor "
+                        f"phase '{other_id}' accepted"
                     )
     if len(in_progress) > 1:
         errors.append(
@@ -384,16 +389,16 @@ def verify_repository(root: Path) -> list[str]:
     for package_id, package in state.work_packages.items():
         label = f"work package {package_id}"
         _require_keys(package, package_fields, label, errors)
-        phase_id = package.get("phase")
+        package_phase_id = package.get("phase")
         title = package.get("title")
         status = package.get("status")
         risk = package.get("risk")
 
-        phase_is_string = isinstance(phase_id, str) and bool(phase_id.strip())
+        phase_is_string = isinstance(package_phase_id, str) and bool(package_phase_id.strip())
         if not phase_is_string:
             errors.append(f"{label}: phase must be a non-empty string")
-        elif phase_id not in state.phases:
-            errors.append(f"{label}: unknown phase '{phase_id}'")
+        elif package_phase_id not in state.phases:
+            errors.append(f"{label}: unknown phase '{package_phase_id}'")
 
         if not isinstance(title, str) or not title.strip():
             errors.append(f"{label}: title must be a non-empty string")
@@ -458,7 +463,7 @@ def verify_repository(root: Path) -> list[str]:
         if not isinstance(gates, list):
             errors.append(f"{label}: acceptance_gates must be a list")
         else:
-            gate_ids: set[str] = set()
+            gate_ids = set()
             for idx, gate in enumerate(gates):
                 gate_label = f"{label}.acceptance_gates[{idx}]"
                 _validate_gate(
@@ -480,18 +485,20 @@ def verify_repository(root: Path) -> list[str]:
                 dependency = state.work_packages.get(dependency_id)
                 if dependency is not None and dependency.get("status") != "complete":
                     errors.append(
-                        f"{label}: dependency '{dependency_id}' must be complete before status '{status}'"
+                        f"{label}: dependency '{dependency_id}' must be complete "
+                        f"before status '{status}'"
                     )
         if (
             status_is_string
             and status in {"ready", "in_progress"}
             and phase_is_string
-            and phase_id in state.phases
+            and package_phase_id in state.phases
+            and state.phases[package_phase_id].get("status") != "in_progress"
         ):
-            if state.phases[phase_id].get("status") != "in_progress":
-                errors.append(
-                    f"{label}: owning phase '{phase_id}' must be in_progress before status '{status}'"
-                )
+            errors.append(
+                f"{label}: owning phase '{package_phase_id}' must be in_progress "
+                f"before status '{status}'"
+            )
 
     errors.extend(_dependency_cycles(state.work_packages))
     return sorted(set(errors))
@@ -502,7 +509,10 @@ def eligible_work_packages(state: ControlState) -> list[dict[str, Any]]:
     for package in state.work_packages.values():
         if package.get("status") not in {"planned", "ready"}:
             continue
-        phase = state.phases.get(package.get("phase"))
+        package_phase_id = package.get("phase")
+        phase = (
+            state.phases.get(package_phase_id) if isinstance(package_phase_id, str) else None
+        )
         if not phase or phase.get("status") != "in_progress":
             continue
         blockers = package.get("blockers", [])
@@ -575,7 +585,9 @@ def render_report(state: ControlState, errors: list[str]) -> str:
         for package in eligible:
             package_id = package.get("id")
             title = package.get("title")
-            display_id = package_id if isinstance(package_id, str) and package_id else "<invalid id>"
+            display_id = (
+                package_id if isinstance(package_id, str) and package_id else "<invalid id>"
+            )
             display_title = title if isinstance(title, str) and title.strip() else "<missing title>"
             lines.append(f"- `{display_id}` — {display_title}")
     else:

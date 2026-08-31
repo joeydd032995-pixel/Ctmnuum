@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import NotRequired, TypedDict
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy, VersioningBehavior
@@ -10,7 +11,11 @@ from services.orchestrator.temporal.activities import (
     build_activity_context,
     execute_foundation_activity,
 )
-from services.orchestrator.temporal.contracts import ActivityContext, WorkflowRequest, WorkflowResult
+from services.orchestrator.temporal.contracts import (
+    ActivityContext,
+    WorkflowRequest,
+    WorkflowResult,
+)
 from services.orchestrator.temporal.policies import (
     ACTIVITY_POLICIES,
     FOUNDATION_TASK_QUEUE,
@@ -20,9 +25,37 @@ from services.orchestrator.temporal.workflows import (
     validate_workflow_request,
 )
 
-def activity_execution_options(policy_name: str) -> dict[str, object]:
+# FOUNDATION_TASK_QUEUE is re-exported deliberately: the Temporal test modules
+# import it from here alongside FoundationActivity and FoundationWorkflow, so a
+# worker and the queue it serves are named from one place. Without __all__ it
+# reads as an unused import and a lint autofix deletes it, breaking all three
+# test modules at import time.
+__all__ = [
+    "ActivityExecutionOptions",
+    "FOUNDATION_TASK_QUEUE",
+    "FoundationActivity",
+    "FoundationWorkflow",
+    "activity_execution_options",
+]
+
+class ActivityExecutionOptions(TypedDict):
+    """Keyword arguments for workflow.execute_activity.
+
+    Typed rather than dict[str, object] so the ** unpacking below can be
+    checked: against a plain object-valued dict no execute_activity overload
+    matches, and its return type degrades to Any.
+    """
+
+    start_to_close_timeout: timedelta
+    schedule_to_close_timeout: timedelta
+    retry_policy: RetryPolicy
+    cancellation_type: workflow.ActivityCancellationType
+    heartbeat_timeout: NotRequired[timedelta]
+
+
+def activity_execution_options(policy_name: str) -> ActivityExecutionOptions:
     policy = ACTIVITY_POLICIES[policy_name]
-    options: dict[str, object] = {
+    options: ActivityExecutionOptions = {
         "start_to_close_timeout": timedelta(
             seconds=policy.start_to_close_timeout_seconds
         ),

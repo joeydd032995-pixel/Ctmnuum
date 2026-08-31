@@ -74,15 +74,21 @@ def policy_errors(state: ControlState) -> list[str]:
     open_gap_blocks = _open_gap_blocks(state)
 
     for package_id, package in state.work_packages.items():
-        phase = state.phases.get(package.get("phase"))
+        package_phase_id = package.get("phase")
+        package_phase = (
+            state.phases.get(package_phase_id) if isinstance(package_phase_id, str) else None
+        )
         status = package.get("status")
 
-        if status == "complete" and phase is not None:
-            if phase.get("status") not in {"in_progress", "accepted"}:
-                errors.append(
-                    f"work package {package_id}: complete package cannot bypass inactive phase "
-                    f"'{phase.get('id')}' with status '{phase.get('status')}'"
-                )
+        if (
+            status == "complete"
+            and package_phase is not None
+            and package_phase.get("status") not in {"in_progress", "accepted"}
+        ):
+            errors.append(
+                f"work package {package_id}: complete package cannot bypass inactive phase "
+                f"'{package_phase.get('id')}' with status '{package_phase.get('status')}'"
+            )
 
         explicit_blockers = set(package.get("blockers", []))
         automatic_blockers = set(open_gap_blocks.get(package_id, []))
@@ -91,14 +97,16 @@ def policy_errors(state: ControlState) -> list[str]:
         if missing_explicit:
             errors.append(
                 f"work package {package_id}: open source gap(s) "
-                f"{', '.join(sorted(missing_explicit))} block this package and must appear in blockers"
+                f"{', '.join(sorted(missing_explicit))} block this package "
+                f"and must appear in blockers"
             )
 
         for blocker_id in explicit_blockers:
-            gap = state.source_gaps.get(blocker_id)
-            if gap is not None and gap.get("status") == "resolved":
+            blocker_gap = state.source_gaps.get(blocker_id)
+            if blocker_gap is not None and blocker_gap.get("status") == "resolved":
                 errors.append(
-                    f"work package {package_id}: resolved source gap '{blocker_id}' remains in blockers"
+                    f"work package {package_id}: resolved source gap "
+                    f"'{blocker_id}' remains in blockers"
                 )
 
     return sorted(set(errors))
