@@ -1033,6 +1033,12 @@ are `[DECISION]` and are deliberately left unpinned here rather than invented.**
 > `CONT-LOCAL-GOV-001` prohibits. These must be pinned at implementation time
 > and recorded in `uv.lock`, not asserted as recovered specification.
 
+**ADR-0008 makes that the rule.** Each library is pinned by the work package
+that first imports it — `alembic` and `psycopg` by `FND-DB-DOMAIN`,
+`opentelemetry-*` by `FND-OTEL-001`, `boto3` by `FND-ART-001` — and `uv.lock`
+is authoritative for the value. No version here is `[V12]`.
+`[DECISION: ADR-0008]`
+
 ---
 
 ## 7. Temporal definitions
@@ -1159,9 +1165,16 @@ Constraints these must satisfy, all `[V12]`:
 - Long Activities MUST heartbeat; heartbeat details MUST NOT contain credentials
   or large data bodies.
 - Retry intervals follow the four named policies — `MODEL_RETRY`, `IO_RETRY`,
-  `SIDE_EFFECT_RETRY`, `SANDBOX_RETRY` — whose `initial_interval`,
-  `backoff_coefficient` and `maximum_interval` **are** stated in v1.2 and are
-  not currently encoded in `ActivityPolicy`. See finding F-07.
+  `SIDE_EFFECT_RETRY`, `SANDBOX_RETRY`. Their `initial_interval`,
+  `backoff_coefficient` and `maximum_interval` **are** stated in v1.2, and
+  finding F-07 was that none of them was encoded anywhere. They are now in
+  `RETRY_POLICIES` and passed into the SDK call. `[V12]` `[ADR-0007]`
+
+**The timeouts above are `[DECISION: ADR-0007]`; the retry values are
+`[V12]`.** The mapping from an activity class to one of the four policies is
+`[DERIVED]` — v1.2 states both sides and never connects them — and it changed
+two attempt counts, since `IO_RETRY` allows 5 where `retrieval` capped at 3
+and `SIDE_EFFECT_RETRY` allows 3 where `tool_call` capped at 2.
 
 ---
 
@@ -1197,9 +1210,20 @@ Constraints these must satisfy, all `[V12]`:
 4. ~~**Artifact retention enforcement** (§4.3)~~ — **RESOLVED by ADR-0005.**
    The 7/90/365 schedule is applied by the store; held classes carry no timer,
    cannot be downgraded, and cannot be offered to a deletion job.
-5. **Activity timeout values** (§7.2) — currently in-tree without an ADR.
-6. **Language dependency versions** (§6.2) — deliberately unpinned here.
-7. **`users` / `models` exemption from RLS** (§5).
+5. ~~**Activity timeout values** (§7.2)~~ — **RESOLVED by ADR-0007.** The
+   in-tree values are ratified, and the four retry policies v1.2 *does*
+   state (finding F-07) are now encoded and applied rather than specified
+   and ignored.
+6. ~~**Language dependency versions** (§6.2)~~ — **RESOLVED by ADR-0008,
+   narrowly.** The *rule* is approved — lockfiles are authoritative, each
+   library is pinned by the package that first imports it, no version is
+   ever presented as v1.2 text — not a table of versions for code that does
+   not exist. A weaker claim than "every version is decided", and recorded
+   as such.
+7. ~~**`users` / `models` exemption from RLS** (§5)~~ — **RESOLVED by
+   ADR-0009.** Neither has a tenant dimension, so both are governed by
+   grants rather than policies; a table that ever gains one gets a new
+   tenant-scoped table, not a retrofitted policy.
 8. ~~**Built-in agent visibility** (§5)~~ — **RESOLVED by ADR-0006.**
    Withdrawn rather than approved. A nullable `workspace_id` is what let a
    row escape a tenant-qualified foreign key under `MATCH SIMPLE`, so the
@@ -1249,9 +1273,17 @@ declaration is relied upon.
 
 ### Known divergences from v1.2 already in-tree
 
-These are separate findings, not part of this reconstruction: Temporal task
-queue names and the priority scale (F-06), retry backoff shape (F-07), and
-worker deployment queue coverage (F-08).
+These are separate findings, not part of this reconstruction.
+
+**F-07 (retry backoff shape) is closed by ADR-0007** — the values were stated
+in v1.2 and encoded nowhere; they are now encoded and applied.
+
+**F-06 is larger than "task queue names and the priority scale" suggests.**
+Of v1.2's six queues — `control`, `interactive`, `batch`, `actions`,
+`sandbox`, `gpu` — only `interactive` and `sandbox` exist in `policies.py`,
+which adds five of its own. And the priority scale is **inverted**: v1.2 runs
+1–5 with 1 highest, the tree runs 10–80 with 80 highest, on different keys.
+F-06 and **F-08** (worker deployment queue coverage) are tracked as issues.
 
 ---
 

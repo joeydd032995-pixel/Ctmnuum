@@ -3,7 +3,7 @@
   "id": "FND-DB-DOMAIN",
   "phase": "foundation",
   "title": "Core domain schema, event store and Alembic migrations",
-  "status": "blocked",
+  "status": "planned",
   "risk": "high",
   "approval_required": true,
   "source_requirements": [
@@ -37,8 +37,6 @@
       "evidence": []
     }
   ],
-  "blockers": [
-    "SRC-001"
-  ],
+  "blockers": [],
   "rollback": "Revert the migration commits and restore the prior schema revision; no domain DDL may be presented as recovered v1.2 source text while SRC-001 is open."
 }

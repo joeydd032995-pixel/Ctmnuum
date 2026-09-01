@@ -3,8 +3,8 @@
   "source_gaps": [
     {
       "id": "SRC-001",
-      "description": "The standalone machine-readable Continuum v1.2 core implementation artifact referenced by the deep-research report is not present in the repository, conversation files, or Library, and the corpus search is exhaustive: across all four distinct source documents only 3 of the 25 v1.2-named tables carry DDL. The original is treated as unrecoverable. A DERIVED replacement with per-declaration provenance is committed under docs/spec/ (FND-SPEC-001) and is CI-verified against PostgreSQL 18 + pgvector. This gap remains OPEN: issue #2's second close criterion requires the reconstructed detail to be approved through an ADR, which has not happened.",
-      "status": "open",
+      "description": "The standalone machine-readable Continuum v1.2 core implementation artifact referenced by the deep-research report is not present in the repository, conversation files, or Library, and the corpus search is exhaustive: across all four distinct source documents only 3 of the 25 v1.2-named tables carry DDL. The original is treated as unrecoverable, so issue #2's first close criterion is unreachable. A DERIVED replacement with per-declaration provenance is committed under docs/spec/ (FND-SPEC-001) and is CI-verified against PostgreSQL 18 + pgvector. CLOSED under issue #2's second criterion by FND-SPEC-002: every [DECISION] is covered by an accepted ADR, verified by scripts/check_decision_coverage.py rather than asserted. Field and timeout clauses are answered completely (ADR-0002 through ADR-0007, ADR-0009, ADR-0010). The version clause is answered NARROWLY by ADR-0008, which approves the pinning rule rather than inventing versions for six libraries nothing imports yet -- a weaker claim than 'every version is decided', recorded as such in docs/implementation/evidence/FND-SPEC-002.md. Reopen if that reading is rejected.",
+      "status": "resolved",
       "severity": "high",
       "blocks": [
         "FND-DB-DOMAIN"
