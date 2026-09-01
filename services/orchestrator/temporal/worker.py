@@ -19,7 +19,9 @@ class WorkerDeployment:
     preview_features_enabled: bool
 
 
-def build_worker_deployment(*, build_id: str, rollback_build_id: str | None = None) -> WorkerDeployment:
+def build_worker_deployment(
+    *, build_id: str, rollback_build_id: str | None = None
+) -> WorkerDeployment:
     if not build_id.strip():
         raise ValueError("build_id is required")
     if rollback_build_id is not None and not rollback_build_id.strip():

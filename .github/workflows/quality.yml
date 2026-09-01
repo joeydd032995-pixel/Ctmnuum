@@ -1,0 +1,69 @@
+name: Code Quality
+
+# [FND-REPO-G3] Format, lint and typecheck, ahead of unit tests.
+#
+# Reusable rather than duplicated: the workflows that run unit tests call this
+# as a job and declare `needs:` on it, so the gate order is enforced by the
+# dependency graph instead of by convention. A job that merely runs earlier in a
+# file still runs in parallel.
+#
+# Everything here resolves from uv.lock -- ruff, mypy and pglast are locked dev
+# dependencies. [FND-REPO-G2]
+
+on:
+  # Called by the workflows that run unit tests, which each declare `needs:` on
+  # it. Not triggered directly: those callers already run on every pull request,
+  # and a standalone trigger would run this three times per PR.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      # uv resolves the lockfile, so its own version is necessarily pinned here
+      # rather than in uv.lock -- it is the one dependency that cannot come from
+      # the lock it produces.
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.8.17
+
+      - name: Install locked Python dependencies
+        run: uv sync --locked --all-groups
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+
+      # Corepack activates the exact pnpm named by package.json packageManager,
+      # so the resolver version is pinned alongside the lockfile it reads.
+      - name: Activate the pinned pnpm
+        run: corepack enable && corepack prepare --activate
+
+      # [FND-REPO-G2] the Node half: --frozen-lockfile fails rather than
+      # updating pnpm-lock.yaml, which is what makes the install reproducible.
+      - name: Install locked Node dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify repository structure and runtime pins
+        run: uv run python scripts/verify_structure.py
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Typecheck
+        run: uv run mypy .

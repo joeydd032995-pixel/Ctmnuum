@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from services.orchestrator.temporal.contracts import ActivityContext, WorkflowRequest, WorkflowResult
+from services.orchestrator.temporal.contracts import (
+    ActivityContext,
+    WorkflowRequest,
+    WorkflowResult,
+)
 
 
 def build_activity_context(

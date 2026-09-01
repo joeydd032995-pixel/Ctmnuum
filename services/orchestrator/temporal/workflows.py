@@ -10,10 +10,7 @@ def should_continue_as_new(*, event_count: int, age_seconds: int) -> bool:
     # The v1.2 contract is strict: Continue-As-New above 8,000 history events or
     # above 24h of recurring execution. Comparing with >= would fire one event
     # and one second early, at the threshold rather than beyond it.
-    return (
-        event_count > CONTINUE_AS_NEW.max_events
-        or age_seconds > CONTINUE_AS_NEW.max_age_seconds
-    )
+    return event_count > CONTINUE_AS_NEW.max_events or age_seconds > CONTINUE_AS_NEW.max_age_seconds
 
 
 def validate_workflow_request(request: WorkflowRequest) -> None:

@@ -3,7 +3,7 @@
   "id": "FND-REPO-001",
   "phase": "foundation",
   "title": "Monorepo, build tooling and lockfile baseline",
-  "status": "planned",
+  "status": "complete",
   "risk": "low",
   "approval_required": false,
   "source_requirements": [
@@ -16,22 +16,55 @@
       "id": "FND-REPO-G1",
       "description": "Repository structure, workspace definitions and pinned language runtimes are present and verified by an automated structure gate.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/implementation/evidence/FND-REPO-001.md"
+        },
+        {
+          "path": "scripts/verify_structure.py"
+        },
+        {
+          "path": ".github/workflows/foundation-structure.yml"
+        }
+      ]
     },
     {
       "id": "FND-REPO-G2",
       "description": "Python and Node dependency resolution is lockfile-driven and reproducible; CI installs from the committed lockfiles rather than ad-hoc version pins.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/implementation/evidence/FND-REPO-001.md"
+        },
+        {
+          "path": "uv.lock"
+        },
+        {
+          "path": "pnpm-lock.yaml"
+        },
+        {
+          "path": ".github/workflows/quality.yml"
+        }
+      ]
     },
     {
       "id": "FND-REPO-G3",
       "description": "Format, lint and typecheck run in CI ahead of unit tests, per the v1.2 CI gate order.",
       "hard": true,
-      "status": "PENDING",
-      "evidence": []
+      "status": "PASS",
+      "evidence": [
+        {
+          "path": "docs/implementation/evidence/FND-REPO-001.md"
+        },
+        {
+          "path": ".github/workflows/quality.yml"
+        },
+        {
+          "path": ".github/workflows/implementation-control-plane.yml"
+        }
+      ]
     }
   ],
   "blockers": [],

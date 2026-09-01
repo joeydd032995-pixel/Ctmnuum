@@ -12,7 +12,14 @@ permissions:
   contents: read
 
 jobs:
+  # [FND-REPO-G3] format, lint and typecheck run before any unit test. This
+  # workflow was the one that ran a unit test without the gate, so the gate held
+  # for two of the three test workflows and not for this one.
+  quality:
+    uses: ./.github/workflows/quality.yml
+
   database-bootstrap-contract:
+    needs: quality
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -24,5 +31,17 @@ jobs:
         with:
           python-version: '3.13'
 
+      # uv resolves the lockfile, so its own version is necessarily pinned here
+      # rather than in uv.lock -- it is the one dependency that cannot come from
+      # the lock it produces.
+      - name: Install uv
+        run: python -m pip install --disable-pip-version-check uv==0.8.17
+
+      # [FND-REPO-G2] This test imports only the standard library, so bare
+      # `python` happened to work. That is luck, not design: the moment it grows
+      # a dependency the interpreter it runs under stops matching the lockfile.
+      - name: Install locked dependencies
+        run: uv sync --locked --all-groups
+
       - name: Verify source-backed database bootstrap invariants
-        run: python -m unittest tests.unit.test_database_bootstrap_contract
+        run: uv run python -m unittest tests.unit.test_database_bootstrap_contract

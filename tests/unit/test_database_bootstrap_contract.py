@@ -3,12 +3,18 @@ from __future__ import annotations
 import re
 import unittest
 from pathlib import Path
+from typing import ClassVar
 
 ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "packages" / "continuum_db" / "sql" / "bootstrap.sql"
 
 
 class DatabaseBootstrapContractTests(unittest.TestCase):
+    # Declared because setUpClass populates them: without the annotations every
+    # use below reads as an attribute that is never assigned.
+    sql: ClassVar[str]
+    normalized: ClassVar[str]
+
     @classmethod
     def setUpClass(cls) -> None:
         if not BOOTSTRAP.is_file():

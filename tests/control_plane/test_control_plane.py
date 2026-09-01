@@ -294,12 +294,8 @@ class RepositoryContractTests(unittest.TestCase):
             )
             state = load_control_state(root)
             errors = policy_errors(state)
-            self.assertTrue(
-                any("unknown work package" in error for error in errors), errors
-            )
-            self.assertTrue(
-                any("FND-DOES-NOT-EXIST" in error for error in errors), errors
-            )
+            self.assertTrue(any("unknown work package" in error for error in errors), errors)
+            self.assertTrue(any("FND-DOES-NOT-EXIST" in error for error in errors), errors)
 
     def test_resolved_source_gap_blocking_unknown_package_is_also_rejected(self) -> None:
         # Registry integrity does not depend on gap status; a dangling reference
@@ -324,9 +320,7 @@ class RepositoryContractTests(unittest.TestCase):
                 },
             )
             errors = policy_errors(load_control_state(root))
-            self.assertTrue(
-                any("unknown work package" in error for error in errors), errors
-            )
+            self.assertTrue(any("unknown work package" in error for error in errors), errors)
 
     def test_source_gap_blocks_entries_must_be_non_empty_strings(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -349,9 +343,7 @@ class RepositoryContractTests(unittest.TestCase):
                 },
             )
             errors = policy_errors(load_control_state(root))
-            self.assertTrue(
-                any("non-empty strings" in error for error in errors), errors
-            )
+            self.assertTrue(any("non-empty strings" in error for error in errors), errors)
 
     def test_phase_chain_must_match_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -374,9 +366,7 @@ class RepositoryContractTests(unittest.TestCase):
             malformed["status"] = {"value": "planned"}
             malformed["risk"] = ["low"]
             malformed["source_requirements"] = [["REQ-001"]]
-            _write_json(
-                root / "docs/implementation/work-packages/FND-B.json", malformed
-            )
+            _write_json(root / "docs/implementation/work-packages/FND-B.json", malformed)
 
             try:
                 errors = verify_repository(root)
@@ -396,9 +386,7 @@ class RepositoryContractTests(unittest.TestCase):
             _seed_minimal_repo(root)
             package = _package("FND-B")
             del package["title"]
-            _write_json(
-                root / "docs/implementation/work-packages/FND-B.json", package
-            )
+            _write_json(root / "docs/implementation/work-packages/FND-B.json", package)
             errors = verify_repository(root)
             state = load_control_state(root)
 
@@ -408,12 +396,10 @@ class RepositoryContractTests(unittest.TestCase):
             self.assertIn("missing required field 'title'", report)
 
     def test_authoritative_commands_use_policy_module_invocation(self) -> None:
-        template = (ROOT / ".github/pull_request_template.md").read_text(
+        template = (ROOT / ".github/pull_request_template.md").read_text(encoding="utf-8")
+        evidence = (ROOT / "docs/implementation/evidence/FND-CTRL-001.md").read_text(
             encoding="utf-8"
         )
-        evidence = (
-            ROOT / "docs/implementation/evidence/FND-CTRL-001.md"
-        ).read_text(encoding="utf-8")
 
         self.assertIn("python -m scripts.control_plane_policy verify", template)
         self.assertNotIn("python scripts/control_plane.py verify", template)
@@ -439,9 +425,7 @@ class RepositoryContractTests(unittest.TestCase):
         else:
             self.assertEqual(temporal["status"], "complete")
             self.assertNotIn("FND-TEMP-001", eligible)
-            hard_gates = [
-                gate for gate in temporal["acceptance_gates"] if gate["hard"]
-            ]
+            hard_gates = [gate for gate in temporal["acceptance_gates"] if gate["hard"]]
             self.assertGreaterEqual(len(hard_gates), 1)
             self.assertTrue(all(gate["status"] == "PASS" for gate in hard_gates))
 

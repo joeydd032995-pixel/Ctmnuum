@@ -46,9 +46,7 @@ class TemporalFoundationContractTests(unittest.TestCase):
                 imported: set[str] = set()
                 for node in ast.walk(tree):
                     if isinstance(node, ast.Import):
-                        imported.update(
-                            alias.name.split(".")[0] for alias in node.names
-                        )
+                        imported.update(alias.name.split(".")[0] for alias in node.names)
                     elif isinstance(node, ast.ImportFrom) and node.module:
                         root_module = node.module.split(".")[0]
                         if root_module != "datetime" or any(

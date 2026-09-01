@@ -7,6 +7,17 @@ dependencies = [
   "temporalio==1.31.0",
 ]
 
+# [DERIVED: FND-REPO-G2] The toolchain CI runs is resolved from uv.lock like
+# every other dependency. Before this, workflows installed pglast and temporalio
+# with ad-hoc `pip install x==y` lines -- the exact thing FND-REPO-G2 prohibits,
+# and a second place a version could drift from the one recorded here.
+[dependency-groups]
+dev = [
+  "ruff==0.15.8",
+  "mypy==1.19.1",
+  "pglast==8.4",
+]
+
 [tool.continuum]
 python = "3.13"
 temporalio = "1.31.0"
@@ -29,3 +40,15 @@ testpaths = ["tests"]
 python_version = "3.13"
 strict = true
 warn_unused_configs = true
+# The service tree uses PEP 420 namespace packages (no __init__.py), so without
+# these mypy resolves services/orchestrator/temporal/contracts.py under two
+# module names at once and refuses to check anything further.
+namespace_packages = true
+explicit_package_bases = true
+mypy_path = "."
+
+# pglast ships no type stubs. It is used only by scripts/check_sql_syntax.py,
+# where the value is PostgreSQL's real grammar rather than any typed API.
+[[tool.mypy.overrides]]
+module = ["pglast.*"]
+ignore_missing_imports = true
