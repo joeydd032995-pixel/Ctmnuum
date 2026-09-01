@@ -24,11 +24,36 @@ fix, one level up.
 Criterion 1 is unreachable — `FND-SPEC-001` established the original is not in
 the corpus and treated it as unrecoverable. Criterion 2, answered per clause:
 
-| Clause | Answered by | Claim |
-|---|---|---|
-| **field** | ADR-0009 (`users`/`models` RLS exemption), ADR-0010 (the 31 residual declarations), plus ADR-0002 through ADR-0006 already accepted | Complete. Every `[DECISION]` tag maps to an accepted ADR, checked mechanically. |
-| **timeout** | ADR-0007 | Complete. The four activity classes' timeouts are ratified; the four v1.2 retry policies are encoded *and applied*. |
-| **version** | ADR-0008 | **Narrower than the literal wording — see below.** |
+### Which half of criterion 2 each clause is answered on
+
+Criterion 2 is a conjunction: *reconstructed from authoritative source material*
+**and** *approved through an ADR*. That distinction was blurred in the first
+draft of this file, which called the field and timeout clauses "Complete"
+without saying which half they met. They are answered on the **ADR-approval
+half, and not the authoritative-source half** — because for a genuine
+`[DECISION]` there is no authoritative source to be reconstructed from. That is
+what the tag means. ADR-0007 says every timeout has "no source to appeal to";
+ADR-0010 says each residual declaration is one "v1.2 does not support".
+
+The reading this closure rests on is that issue #2's own build policy is what
+governs those items:
+
+> We MUST mark any additional schema/default choice as an explicit
+> implementation decision/ADR **rather than** presenting it as recovered source
+> text.
+
+So the issue anticipates two populations: items with source support, which are
+reconstructed and traced; and additional choices, which take the ADR route
+instead. Read that way, criterion 2 is satisfiable. Read as requiring both
+halves of every item, no `[DECISION]` could ever satisfy it and `SRC-001` would
+be permanently unclosable, since criterion 1 is unreachable. **The choice
+between those readings was put to the repository owner, who selected the first.**
+
+| Clause | Answered by | On which half | Claim |
+|---|---|---|---|
+| **field** | ADR-0009 (`users`/`models` RLS exemption), ADR-0010 (the 31 residual declarations), plus ADR-0002 through ADR-0006 already accepted | ADR approval only | Every `[DECISION]` tag maps to an accepted ADR, checked mechanically. No claim that any of them has authoritative source support. |
+| **timeout** | ADR-0007 | ADR approval only | The four activity classes' timeouts are ratified. Distinct from the four v1.2 retry policies in the same ADR, which *are* `[V12]` source text and are now encoded *and applied*. |
+| **version** | ADR-0008 | ADR approval, and narrower still | **Narrower than the literal wording — see below.** |
 
 ### The version clause is answered narrowly, and deliberately
 
@@ -157,13 +182,96 @@ Decision coverage — `scripts/check_decision_coverage.py`:
 | ADR-0005 (cited from the schema) set `Proposed` | `...derived.sql: ... which is not Accepted` |
 | a declaration loses its `[DECISION]` tag | `lists 31 declaration(s) but the schema carries 30` |
 
+## Review round: seven findings, and what each one taught
+
+An automated review of `80e0b7d` raised seven findings. All seven were verified
+against the files before anything was changed; six were real defects in this
+package's own work and are fixed here. The seventh was the governance question
+resolved above.
+
+Three of them share a shape worth naming: **a check that asked whether the right
+thing was present, rather than whether it was in the right place.** That is the
+same shape as assertion 28 and assertion 33 in `FND-SPEC-001`, both of which
+passed review and failed only under a mutation nobody had tried.
+
+| # | Finding | Was it real | Fix |
+|---|---|---|---|
+| 1 | `"Accepted" in status_line` is a substring test, so a status of `Not Accepted` passes | Yes | Parse the `**Status:**` value and require it to *start with* `Accepted` |
+| 2 | The enumeration was compared to the schema by **count only**, so a renamed or transposed row passed | Yes | Compare `(location, declaration)` pairwise; ADR-0010's "cannot drift" claim is now true |
+| 3 | `[DECISION: ADR-0004 bound]` matched neither the reference pattern nor the bare-tag pattern, so it was checked by **nothing** | Yes — the tag was committed at `derived.sql:765` | Normalise the tag, and **fail closed** on any `[DECISION:` form the gate cannot parse |
+| 4 | `model_metrics.sample_count ... CHECK (sample_count >= 0)` was approved as a conventional default | Yes — a `CHECK` closes a domain, and `model_metrics` feeds routing | Reasoned individually; the class drops from 26 to 25 |
+| 5 | `SRC-001` resolved against a criterion whose source half is unmet | Partly — the overclaim was real, the closure stands | Recorded above; the criterion's two halves are now separated explicitly |
+| 6 | ADR-0010 cited assertions that do not verify what it said they did | Yes | Assertions 36–38 written and each observed to fail |
+| 7 | ADR-0009 called `event_schemas` "read-only to the application" | Yes — it has **no grant at all** | Corrected to inaccessible-by-design via `SECURITY DEFINER` |
+
+Finding 3 is the one to remember. The gate was written to catch unapproved
+decisions, and the single tag in the repository that did not fit its expected
+shape was the one it silently skipped. Skipping the unanticipated case is how a
+gate ends up green on exactly what it exists to reject — the same failure
+`verify_structure.py` was made to fail closed against in `FND-REPO-001`.
+
+### Assertions 36–38, each observed to fail
+
+Written because ADR-0010's previous verification section cited assertions that
+covered something else. Executed against a reduced fixture built by extracting
+the real `CREATE TYPE` / `CREATE TABLE` blocks out of the committed schema — not
+retyped, so a drift in the file is a drift in the fixture. PostgreSQL 16 locally;
+CI executes them against PostgreSQL 18 + pgvector with the whole schema.
+
+| Assertion | Mutation | Result |
+|---|---|---|
+| 36 | `memory_type` label `failure` → `failures` | `labels drifted from ADR-0010: expected {...failure}, got {...failures}` |
+| 36 | `run_status` gains `paused` | `expected {...cancelled}, got {...cancelled,paused}` |
+| 37 | `UNIQUE (workspace_id, name)` dropped | `agents has no UNIQUE (workspace_id, name)` |
+| 37 | replaced with `(name, workspace_id)` | same — ordinality, not membership |
+| 38 | weight bound weakened to `>= 0` | `weight accepted 1.01, which is outside [0,1]` |
+| 38 | weight bound dropped | `weight accepted -0.01, which is outside [0,1]` |
+
+Assertion 38 attempts writes rather than reading the catalog, because a `CHECK`
+that is present and vacuous is a defect this repository has already shipped:
+`CHECK (stage <> 'promoted' OR digest ~ '...')` passed on `NULL`. It also
+asserts `NULL` stays legal, which ADR-0010 requires and a naive tightening of
+the bound would break.
+
+### Coverage-check controls, re-run after the rewrite
+
+| Mutation | Result |
+|---|---|
+| *(baseline)* | passes |
+| ADR-0004 status → `Not Accepted` | fires from all three citing sources |
+| ADR-0004 status → `Superseded (was Accepted)` | fires — the substring test admitted both |
+| enumeration row 23 loses its `CHECK`, count unchanged | `row 23 names ...'weight double precision' but the schema tags ...'weight double precision CHECK (weight BETWEEN 0 AND 1)'` |
+| rows 27/28 transposed, count unchanged | both rows reported |
+| a `[DECISION]` tag moved between columns, count unchanged | three rows reported from the shift |
+| the qualified `[DECISION: ADR-0004 bound]` form restored | `is not a reference this gate understands` |
+
+**Two of these mutations initially produced no output, and that was the
+control's fault, not a pass.** The `sed` patterns did not match the file's
+column alignment, so nothing was mutated and the check correctly reported
+success. Both were rewritten to assert the mutation applied before running the
+check. A negative control that silently fails to mutate is indistinguishable
+from one that fails to detect — the same class of false pass as the stale
+bytecode recorded above, reached by a different route.
+
 ## Gate evidence
 
 ### FND-SPEC2-G1 — every `[DECISION]` covered by an accepted ADR
 
-`scripts/check_decision_coverage.py`, with the five controls above. ADR-0010
-covers the 31 residual declarations: five reasoned individually because each
-closes a domain, twenty-six approved as a class.
+`scripts/check_decision_coverage.py`, with the controls above. The check now
+enforces three things the first version did not: an affirmative `Accepted`
+status rather than a substring, declaration-level agreement between the schema
+and the companion enumeration rather than matching totals, and a hard failure on
+any `[DECISION:` reference it cannot parse rather than skipping it.
+
+ADR-0010 covers the 31 residual declarations: **six** reasoned individually
+because each closes a domain — `citext`, both `[DECISION]` ENUMs, the `agents`
+unique constraint, `model_metrics.sample_count`, and the `claim_evidence` weight
+bound — and twenty-five approved as a class, with the class families enumerating
+all twenty-five so that membership is checkable rather than assumed.
+
+Four of those six now carry assertions that have been observed to fail
+(36, 37, 38 above); `citext` is covered by the apply, which for a hard extension
+dependency genuinely is the check.
 
 ### FND-SPEC2-G2 — timeouts approved, retry policies encoded and applied
 
@@ -174,7 +282,11 @@ not another thing only CI can check.
 
 ### FND-SPEC2-G3 — `SRC-001` closed with each clause answered
 
-The table at the top of this file, including the narrower version claim.
+The clause table at the top of this file, which now records **which half of
+criterion 2 each clause is answered on** — ADR approval, not authoritative
+source — and the reading of issue #2 that the closure depends on. The gap
+description in `source-gaps.json` carries the same qualification, so the
+registry does not read stronger than the evidence.
 
 ## What closing SRC-001 actually unlocked
 

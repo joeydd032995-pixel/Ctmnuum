@@ -55,7 +55,16 @@ administrative.
 
 Exempt for the same reason and recorded already: the registry defines which
 payload shapes exist, and a tenant that could not read it could not write an
-event. It is read-only to the application.
+event.
+
+It is not read-only to the application — it is **not directly accessible to the
+application at all**. The grant block gives `continuum_app` `SELECT` on exactly
+`workspaces`, `users` and `models`; `event_schemas` is absent from every grant
+loop, and the schema comment on the table says why: `events_check_payload` reads
+it as `SECURITY DEFINER`, so validation sees the registry and the application
+never does. That is a stronger position than read-only and is the one this ADR
+approves: a tenant cannot enumerate the event catalogue, only discover that a
+write was rejected.
 
 ## What would have to change
 
