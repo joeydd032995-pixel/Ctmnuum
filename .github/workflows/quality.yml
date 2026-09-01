@@ -59,6 +59,13 @@ jobs:
       - name: Verify repository structure and runtime pins
         run: uv run python scripts/verify_structure.py
 
+      # [FND-SPEC2-G1] Every [DECISION] must name an accepted ADR, and the
+      # companion enumeration must still agree with the tags it is generated
+      # from. Cheap, and the only thing standing between a provenance tag and
+      # meaning whatever the reader assumes.
+      - name: Verify decision coverage
+        run: uv run python scripts/check_decision_coverage.py
+
       - name: Format
         run: uv run ruff format --check .
 
