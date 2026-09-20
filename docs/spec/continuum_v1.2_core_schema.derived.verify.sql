@@ -1310,4 +1310,143 @@ BEGIN
 END
 $$;
 
+-- 36. The two [DECISION] ENUMs carry exactly the labels ADR-0010 approves.
+--
+--     ADR-0010 cited "the schema applies" as proof of these. It is not: a
+--     changed, added or removed label applies just as cleanly, and the domain
+--     ADR-0010 closed would have moved with nothing to notice. Labels are
+--     compared as an ordered array because enumsortorder is what ORDER BY and
+--     comparison operators on the type follow. [DECISION: ADR-0010]
+DO $$
+DECLARE
+    expected text[];
+    actual   text[];
+    t        text;
+BEGIN
+    FOREACH t IN ARRAY ARRAY['memory_type', 'run_status'] LOOP
+        expected := CASE t
+            WHEN 'memory_type' THEN
+                ARRAY['semantic', 'episodic', 'procedural', 'failure']
+            WHEN 'run_status' THEN
+                ARRAY['accepted', 'running', 'succeeded', 'failed', 'cancelled']
+        END;
+        SELECT array_agg(e.enumlabel::text ORDER BY e.enumsortorder) INTO actual
+          FROM pg_enum e
+          JOIN pg_type ty ON ty.oid = e.enumtypid
+          JOIN pg_namespace n ON n.oid = ty.typnamespace
+         WHERE n.nspname = 'continuum' AND ty.typname = t;
+        IF actual IS DISTINCT FROM expected THEN
+            RAISE EXCEPTION
+                'continuum.% labels drifted from ADR-0010: expected %, got %',
+                t, expected, actual;
+        END IF;
+    END LOOP;
+    RAISE NOTICE 'memory_type and run_status carry exactly the approved labels';
+END
+$$;
+
+-- 37. agents carries UNIQUE (workspace_id, name), by columns and in order.
+--
+--     ADR-0010 cited assertion 34, which proves workspace_id is NOT NULL --
+--     necessary for this constraint to bite, and not evidence that it exists.
+--     Dropping the constraint outright left the advertised verification green.
+--     Ordinality matters here for the same reason it did in assertion 33: a
+--     constraint on (name, workspace_id) is a different index, and a membership
+--     test would accept it. [DECISION: ADR-0010]
+DO $$
+DECLARE
+    cols text[];
+BEGIN
+    SELECT array_agg(a.attname::text ORDER BY k.ord) INTO cols
+      FROM pg_constraint c
+      JOIN pg_class cl ON cl.oid = c.conrelid
+      JOIN pg_namespace n ON n.oid = cl.relnamespace
+      CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum, ord)
+      JOIN pg_attribute a ON a.attrelid = c.conrelid AND a.attnum = k.attnum
+     WHERE n.nspname = 'continuum'
+       AND cl.relname = 'agents'
+       AND c.contype = 'u'
+       AND array_length(c.conkey, 1) = 2
+     GROUP BY c.oid
+    HAVING array_agg(a.attname::text ORDER BY k.ord) = ARRAY['workspace_id', 'name'];
+
+    IF cols IS NULL THEN
+        RAISE EXCEPTION
+            'continuum.agents has no UNIQUE (workspace_id, name); one agent name per '
+            'workspace is unenforced';
+    END IF;
+    RAISE NOTICE 'agents UNIQUE (workspace_id, name) is present, in that order';
+END
+$$;
+
+-- 38. The claim_evidence weight bound rejects, rather than merely existing.
+--
+--     ADR-0010 admitted this one had no assertion and deferred it to
+--     FND-DB-DOMAIN. A CHECK that is present but vacuous is the exact defect
+--     this repository has already shipped once: CHECK (stage <> 'promoted' OR
+--     digest ~ '...') passed on NULL because NULL ~ pattern is NULL. So this
+--     exercises the bound at both ends, and confirms NULL stays legal -- the
+--     state ADR-0010 says distinguishes absent evidence from zero weight.
+--     [DECISION: ADR-0010]
+INSERT INTO continuum.claims (id, workspace_id, statement, status, confidence)
+VALUES ('00000000-0000-0000-0000-0000000000c1', '00000000-0000-0000-0000-0000000000aa',
+        'weight bound fixture', 'unverified', 0.5);
+
+INSERT INTO continuum.evidence (
+    id, workspace_id, type, content_hash, observed_at, trust_score
+) VALUES (
+    '00000000-0000-0000-0000-0000000000c2', '00000000-0000-0000-0000-0000000000aa',
+    'first_party', repeat('0', 64), now(), 0.5);
+
+DO $$
+DECLARE
+    ws       CONSTANT uuid := '00000000-0000-0000-0000-0000000000aa';
+    claim    CONSTANT uuid := '00000000-0000-0000-0000-0000000000c1';
+    evid     CONSTANT uuid := '00000000-0000-0000-0000-0000000000c2';
+    rejected int := 0;
+    w        double precision;
+BEGIN
+    -- Distinct stances because (claim_id, evidence_id, stance) is the key;
+    -- reusing one stance would fail on the primary key and read as the bound
+    -- doing work it did not do.
+    FOREACH w IN ARRAY ARRAY[-0.01::double precision, 1.01::double precision] LOOP
+        BEGIN
+            INSERT INTO continuum.claim_evidence
+                (claim_id, evidence_id, workspace_id, stance, weight)
+            VALUES (claim, evid, ws,
+                    CASE WHEN w < 0 THEN 'supports' ELSE 'opposes' END, w);
+            RAISE EXCEPTION 'claim_evidence.weight accepted %, which is outside [0,1]', w;
+        EXCEPTION
+            WHEN check_violation THEN
+                rejected := rejected + 1;
+        END;
+    END LOOP;
+
+    IF rejected <> 2 THEN
+        RAISE EXCEPTION 'the weight bound rejected % of 2 out-of-range values', rejected;
+    END IF;
+
+    -- Both ends of the legal range, and the absent-evidence state.
+    INSERT INTO continuum.claim_evidence
+        (claim_id, evidence_id, workspace_id, stance, weight)
+    VALUES (claim, evid, ws, 'supports', 0);
+    INSERT INTO continuum.claim_evidence
+        (claim_id, evidence_id, workspace_id, stance, weight)
+    VALUES (claim, evid, ws, 'opposes', 1);
+
+    BEGIN
+        UPDATE continuum.claim_evidence SET weight = NULL
+         WHERE claim_id = claim AND evidence_id = evid AND stance = 'supports';
+    EXCEPTION
+        WHEN check_violation THEN
+            RAISE EXCEPTION
+                'the weight bound rejects NULL; absent evidence weight is a legal state '
+                'distinct from zero weight, per ADR-0010';
+    END;
+
+    RAISE NOTICE
+        'claim_evidence.weight rejects values outside [0,1], admits both ends and NULL';
+END
+$$;
+
 SELECT 'DERIVED CORE SCHEMA VERIFICATION PASSED' AS result;

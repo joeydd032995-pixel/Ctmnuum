@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "id": "FND-SPEC-002",
+  "phase": "foundation",
+  "title": "ADR approval of the derived reconstruction, closing SRC-001",
+  "status": "complete",
+  "risk": "medium",
+  "approval_required": false,
+  "source_requirements": [
+    "CONT-V12-GOV-001",
+    "CONT-V12-GOV-003",
+    "CONT-LOCAL-GOV-001"
+  ],
+  "dependencies": [
+    "FND-SPEC-001",
+    "FND-REPO-001"
+  ],
+  "acceptance_gates": [
+    {
+      "id": "FND-SPEC2-G1",
+      "description": "Every [DECISION] in the derived schema and its companion is covered by an accepted ADR, verified by an executable check rather than asserted.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        { "path": "scripts/check_decision_coverage.py" },
+        { "path": "docs/implementation/evidence/FND-SPEC-002.md" },
+        { "path": "docs/adr/0010-residual-schema-declarations.md" }
+      ]
+    },
+    {
+      "id": "FND-SPEC2-G2",
+      "description": "The activity timeouts are ADR-approved, and the four retry policies v1.2 states are encoded, applied to the SDK call, and asserted against literal values without a Temporal server.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        { "path": "docs/adr/0007-activity-timeouts-and-the-retry-policies-v12-states.md" },
+        { "path": "services/orchestrator/temporal/policies.py" },
+        { "path": "tests/temporal/test_temporal_foundation.py" }
+      ]
+    },
+    {
+      "id": "FND-SPEC2-G3",
+      "description": "SRC-001 is closed with issue #2's close criterion quoted and each clause answered by a named ADR, including where the answer is narrower than the criterion's literal wording.",
+      "hard": true,
+      "status": "PASS",
+      "evidence": [
+        { "path": "docs/implementation/evidence/FND-SPEC-002.md" },
+        { "path": "docs/implementation/source-gaps.json" },
+        { "path": "docs/adr/0008-versions-are-pinned-by-the-package-that-uses-them.md" },
+        { "path": "docs/adr/0009-users-and-models-are-not-workspace-scoped.md" }
+      ]
+    }
+  ],
+  "blockers": [],
+  "rollback": "Revert the FND-SPEC-002 commits and set SRC-001 back to open; no schema, migration or cloud resource is created, so rollback has no data implications."
+}

@@ -35,15 +35,31 @@ class TemporalFailureSemanticsTests(unittest.TestCase):
         options = options_factory("model_call")
         retry = options["retry_policy"]
         self.assertEqual(retry.maximum_attempts, 3)
+
+        # [ADR-0007] The union of v1.2's MODEL_RETRY list and Continuum's own
+        # permanent-error taxonomy, in that order. Asserted exactly rather than
+        # by membership: a set that silently grows or loses an entry changes
+        # which failures retry, and "contains" would not notice either.
         self.assertEqual(
             tuple(retry.non_retryable_error_types or ()),
             (
+                "InvalidInputError",
+                "ProviderBadRequestError",
+                "PolicyDeniedError",
+                "BudgetExceededError",
                 "continuum.validation",
                 "continuum.authorization",
                 "continuum.policy_denied",
                 "continuum.permanent",
             ),
         )
+
+        # [V12] The backoff v1.2 states for MODEL_RETRY. Before ADR-0007 these
+        # were absent from the SDK call entirely, so Temporal applied its own
+        # defaults -- the values were specified and not applied.
+        self.assertEqual(retry.initial_interval, timedelta(seconds=2))
+        self.assertEqual(retry.backoff_coefficient, 2.0)
+        self.assertEqual(retry.maximum_interval, timedelta(seconds=20))
 
     def test_long_running_policy_maps_heartbeat_and_cancellation(self) -> None:
         options_factory = getattr(runtime, "activity_execution_options", None)

@@ -762,7 +762,7 @@ CREATE TABLE continuum.events (
     actor_type          text NOT NULL,                                -- [V12 name] [DERIVED shape]
     actor_id            uuid,                                         -- [V12 name] [DERIVED shape]
     trace_id            char(32),                                     -- [V12 name] [DERIVED shape]
-    payload             continuum.jsonb_8k NOT NULL,                                 -- [V12 name] [V11 shape] [DECISION: ADR-0004 bound]
+    payload             continuum.jsonb_8k NOT NULL,                                 -- [V12 name] [V11 shape] [DECISION: ADR-0004] bound
     payload_artifact_id uuid,                                         -- [DERIVED] >256 KiB to S3
     previous_hash       char(64),                                     -- [V12 name] [DERIVED shape]
     -- NOT NULL is retained: BEFORE ROW triggers fire before constraints are

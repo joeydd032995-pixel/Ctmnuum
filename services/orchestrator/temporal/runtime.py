@@ -59,7 +59,13 @@ def activity_execution_options(policy_name: str) -> ActivityExecutionOptions:
     options: ActivityExecutionOptions = {
         "start_to_close_timeout": timedelta(seconds=policy.start_to_close_timeout_seconds),
         "schedule_to_close_timeout": timedelta(seconds=policy.schedule_to_close_timeout_seconds),
+        # [V12] The interval fields come from the v1.2 policy governing this
+        # class. Without them Temporal applies its own defaults, so the values
+        # the specification states would be encoded and still not applied.
         "retry_policy": RetryPolicy(
+            initial_interval=timedelta(seconds=policy.retry.initial_interval_seconds),
+            backoff_coefficient=policy.retry.backoff_coefficient,
+            maximum_interval=timedelta(seconds=policy.retry.maximum_interval_seconds),
             maximum_attempts=policy.maximum_attempts,
             non_retryable_error_types=policy.non_retryable_error_types,
         ),
